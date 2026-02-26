@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+@theme {
+    --color-tg-bg: #0f1721;
+    --color-tg-sidebar: #17212b;
+    --color-tg-header: #242f3d;
+    --color-tg-accent: #5288c1;
+    --color-tg-text: #ffffff;
+    --color-tg-text-secondary: #708499;
+    --color-tg-msg-out: #2b5278;
+    --color-tg-msg-in: #182533;
+}
+
+@layer base {
+    body {
+        @apply bg-tg-bg text-tg-text antialiased;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+}
+
+@layer components {
+    .tg-input {
+        @apply w-full bg-tg-header border-none rounded-lg p-3 text-tg-text placeholder-tg-text-secondary outline-none focus:ring-2 focus:ring-tg-accent transition-all;
+    }
+
+    .tg-button {
+        @apply w-full bg-tg-accent text-white font-medium py-3 rounded-lg transition-all active:scale-[0.98] disabled:opacity-50 disabled:scale-100;
+    }
+
+    .tg-button:hover {
+        @apply opacity-90;
+    }
+
+    .sidebar-item {
+        @apply flex items-center p-3 cursor-pointer hover:bg-tg-header transition-colors rounded-lg mx-2;
+    }
+
+    .sidebar-item.active {
+        @apply bg-tg-accent;
+    }
+}
+
+/* Custom Scrollbar like Telegram */
+::-webkit-scrollbar {
+    width: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #242f3d;
+    border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #2b5278;
+}
