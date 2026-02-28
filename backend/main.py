@@ -568,11 +568,12 @@ async def get_user_profile(current_user: str = Depends(get_current_user_from_coo
     contacts = database.list_contacts(current_user)
 
     return {
-        "username":      user["username"],
-        "display_name":  user.get("display_name") or user["username"],
-        "member_since":  user.get("created_at", "unknown"),
-        "is_mfa_enabled": user.get("is_mfa_enabled", False),
-        "contact_count": len(contacts),
+        "username":             user["username"],
+        "display_name":         user.get("display_name") or user["username"],
+        "member_since":         user.get("created_at", "unknown"),
+        "is_mfa_enabled":       user.get("is_mfa_enabled", False),
+        "contact_count":        len(contacts),
+        "calibration_progress": database.get_calibration_progress(current_user),
     }
 
 @app.get("/api/contacts/search/{query}")

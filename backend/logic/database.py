@@ -242,6 +242,18 @@ def add_contact(username, contact_username):
 def list_contacts(username):
     return contacts_db.get(username, [])
 
+def get_calibration_progress(username: str) -> int:
+    """
+    นับจำนวนข้อความที่ username ส่งไปหา system_bot เพื่อวัดความคืบหน้า Calibration
+    - 0–5 ข้อความ = ยังอยู่ระหว่างเรียนรู้ (Identity Baseline ยังไม่ครบ)
+    - 5 ข้อความ = Identity Baseline Created (Stylometry พร้อมใช้งาน)
+    """
+    count = sum(
+        1 for msg in messages_db
+        if msg.get("sender") == username and msg.get("receiver") == "system_bot"
+    )
+    return min(count, 5)
+
 def save_message(sender, receiver, content):
     """
     Encrypt and save a message.

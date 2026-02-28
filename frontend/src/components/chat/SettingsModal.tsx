@@ -12,9 +12,10 @@ type Tab = 'profile' | 'privacy' | 'general';
 
 interface ProfileData {
     username: string;
-    member_since: string | null;  // API returns 'member_since'
+    member_since: string | null;
     is_mfa_enabled: boolean;
     contact_count: number;
+    calibration_progress: number;  // 0-5 messages sent to system_bot
 }
 
 /**
@@ -186,6 +187,45 @@ const SettingsModal: React.FC<Props> = ({ onClose, onOpenActivity }) => {
                                                 </span>
                                             )}
                                         </div>
+
+                                        {/* ─── Security Health & Stylometry ─── */}
+                                        {(() => {
+                                            const prog = profile?.calibration_progress ?? 0;
+                                            const pct  = Math.round((prog / 5) * 100);
+                                            return prog >= 5 ? (
+                                                /* ✅ Baseline เสร็จแล้ว */
+                                                <div className="bg-green-500/10 border border-green-500/25 rounded-xl p-4 flex items-center gap-3">
+                                                    <div className="w-9 h-9 bg-green-500/20 rounded-lg flex items-center justify-center shrink-0">
+                                                        <Shield size={18} className="text-green-400" />
+                                                    </div>
+                                                    <div>
+                                                        <div className="text-green-400 font-semibold text-sm">Identity Baseline Created ✅</div>
+                                                        <div className="text-green-300/70 text-xs mt-0.5">ระบบจดจำเอกลักษณ์การพิมพ์ของคุณเรียบร้อยแล้ว</div>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                /* ⏳ ยัง Calibrate อยู่ */
+                                                <div className="bg-tg-header rounded-xl p-4 space-y-2">
+                                                    <div className="flex items-center justify-between">
+                                                        <div className="flex items-center gap-2">
+                                                            <Shield size={16} className="text-tg-accent" />
+                                                            <span className="text-white text-sm font-medium">Security Health &amp; Stylometry</span>
+                                                        </div>
+                                                        <span className="text-tg-accent text-xs font-semibold">Calibration: {prog}/5</span>
+                                                    </div>
+                                                    {/* Progress bar */}
+                                                    <div className="w-full h-2 bg-white/10 rounded-full overflow-hidden">
+                                                        <div
+                                                            className="h-full bg-tg-accent rounded-full transition-all duration-500"
+                                                            style={{ width: `${pct}%` }}
+                                                        />
+                                                    </div>
+                                                    <div className="text-tg-text-secondary text-xs">
+                                                        กำลังเรียนรู้สไตล์การพิมพ์ผ่านการคุยกับ Stylometry Guardian...
+                                                    </div>
+                                                </div>
+                                            );
+                                        })()}
                                     </>
                                 )}
                             </motion.div>
