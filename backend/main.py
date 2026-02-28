@@ -9,6 +9,7 @@ import bcrypt
 import json
 
 from logic import database, mock_ai
+from logic.database import AuditAction
 
 # ตั้งค่า Security เบื้องต้น
 SECRET_KEY = "thai_stylometry_v2_very_secure_secret_key"
@@ -16,6 +17,40 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
 app = FastAPI(title="Thai Stylometry V2 API")
+
+# --------- STARTUP ---------
+@app.on_event("startup")
+async def startup_event():
+    """
+    เรียก create_audit_log_table() ตอนเริ่ม Server
+    เพื่อให้มั่นใจว่าโครงสร้างตาราง Audit Log พร้อมใช้งานก่อน Request แรกเข้ามา
+    """
+    database.create_audit_log_table()
+
+# --------- AUDIT HELPERS ---------
+def get_client_ip(request: Request) -> str:
+    """
+    ดึง IP Address จริงของ Client
+    รองรับกรณีที่ผ่าน Reverse Proxy (X-Forwarded-For)
+    การเก็บ IP ช่วยตรวจจับ:
+      - Brute-force จาก IP เดียวกัน
+      - การเข้าใช้งานจากประเทศ/ภูมิภาคผิดปกติ (Geo-anomaly)
+    """
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def get_user_agent(request: Request) -> str:
+    """
+    ดึง User-Agent (Browser/OS/Device) จาก Request Header
+    การเก็บ User-Agent ช่วย:
+      - ตรวจจับ Device ที่ไม่เคยใช้มาก่อน (New Device Detection)
+      - ระบุ Automated Bot / Script ที่โจมตีระบบ
+      - ประกอบ Digital Fingerprint ของ Session
+    """
+    return request.headers.get("user-agent", "unknown")
 
 # --------- CORS CONFIGURATION ---------
 # อนุญาตเฉพาะ Frontend Astro/React จากพอร์ต 4321, 4322, 4323 (และ credentials=True เพื่อให้รับ-ส่ง Cookie ได้)
@@ -147,17 +182,34 @@ class ContactAdd(BaseModel):
     contact_username: str
 
 @app.post("/api/register")
-async def register(user: AuthModel):
+async def register(request: Request, user: AuthModel):
     hashed_pw = get_password_hash(user.password)
-    # สมัครสมาชิก
     if database.create_user(user.username, hashed_pw):
+        # บันทึก: การสร้างตัวตนใหม่ในระบบ Digital ID
+        # สำคัญสำหรับตรวจสอบว่ามีการสร้าง Account จำนวนมากผิดปกติ (Mass Registration)
+        database.save_audit_log(
+            action=AuditAction.REGISTER,
+            ip_address=get_client_ip(request),
+            user_agent=get_user_agent(request),
+            user_id=user.username,
+        )
         return {"msg": "User created successfully"}
     raise HTTPException(status_code=400, detail="Username already exists")
 
 @app.post("/api/login")
-async def login(response: Response, form_data: OAuth2PasswordRequestForm = Depends()):
+async def login(request: Request, response: Response, form_data: OAuth2PasswordRequestForm = Depends()):
     user = database.get_user(form_data.username)
     if not user or not verify_password(form_data.password, user["password"]):
+        # บันทึก: การ Login ล้มเหลว — หัวใจของการตรวจจับ Brute-force
+        # user_id อาจเป็น None หรือชื่อที่ป้อนมา (อาจไม่มีในระบบ)
+        # การเก็บ IP + Timestamp ช่วยนับความถี่การพยายาม Login ในช่วงเวลาหนึ่ง
+        database.save_audit_log(
+            action=AuditAction.LOGIN_FAILED,
+            ip_address=get_client_ip(request),
+            user_agent=get_user_agent(request),
+            user_id=form_data.username or None,
+            extra_data={"reason": "invalid_credentials"},
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -168,6 +220,15 @@ async def login(response: Response, form_data: OAuth2PasswordRequestForm = Depen
         data={"sub": user["username"]}, expires_delta=access_token_expires
     )
     
+    # บันทึก: การ Login สำเร็จ — ยืนยันตัวตนถูกต้อง
+    # ใช้ติดตาม Session ใหม่และวิเคราะห์ Pattern เวลาการเข้าใช้งาน (Time-based Anomaly)
+    database.save_audit_log(
+        action=AuditAction.LOGIN_SUCCESS,
+        ip_address=get_client_ip(request),
+        user_agent=get_user_agent(request),
+        user_id=user["username"],
+    )
+
     # 📌 Security Upgrade: ส่ง Token กลับไปทาง Set-Cookie (HttpOnly, Secure, SameSite=Lax)
     # เพื่อป้องกันไม่ให้ฝั่ง Frontend ใช้ JavaScript เข้าถึง Token (XSS Protection)
     response.set_cookie(
@@ -194,6 +255,23 @@ async def get_me(current_user: str = Depends(get_current_user_from_cookie)):
     """
     return {"username": current_user, "status": "authenticated"}
 
+@app.get("/api/me/logs")
+async def get_my_audit_logs(current_user: str = Depends(get_current_user_from_cookie)):
+    """
+    ดึงประวัติความปลอดภัย (Audit Logs) ของผู้ใช้ที่ล็อกอินอยู่
+
+    เหตุผลที่ต้องมี Endpoint นี้ตามหลัก Digital ID:
+    - ความโปร่งใส (Transparency): ผู้ใช้มีสิทธิ์รู้ว่าระบบบันทึกอะไรเกี่ยวกับตัวเองบ้าง
+    - ตรวจสอบการบุกรุก: ผู้ใช้สามารถดูว่ามีการ LOGIN_FAILED ซ้ำๆ หรือมี
+                          STYLOMETRY_ALERT ที่บ่งชี้ว่าบัญชีถูกยึดหรือไม่
+    - สิทธิ์การเข้าถึงข้อมูล: ตามมาตรา PDPA ผู้ใช้มีสิทธิ์ขอดูข้อมูลส่วนตัว
+
+    Returns:
+        {"logs": [...]} — รายการ Audit Logs ทั้งหมดของผู้ใช้ เรียงตาม timestamp
+    """
+    logs = database.get_audit_logs(user_id=current_user)
+    return {"logs": logs}
+
 @app.get("/api/contacts/search/{query}")
 async def search_contacts(query: str, current_user: str = Depends(get_current_user_from_cookie)):
     # ค้นหาชื่อเพื่อน
@@ -202,9 +280,19 @@ async def search_contacts(query: str, current_user: str = Depends(get_current_us
     return {"results": matched}
 
 @app.post("/api/contacts/add")
-async def add_contact(data: ContactAdd, current_user: str = Depends(get_current_user_from_cookie)):
+async def add_contact(request: Request, data: ContactAdd, current_user: str = Depends(get_current_user_from_cookie)):
     success = database.add_contact(current_user, data.contact_username)
     if success:
+        # บันทึก: การสร้างความสัมพันธ์ใหม่ใน Social Graph
+        # เก็บทั้ง initiator และ target เพื่อ Map ความสัมพันธ์ระหว่าง Digital Identity
+        database.save_audit_log(
+            action=AuditAction.ADD_CONTACT,
+            ip_address=get_client_ip(request),
+            user_agent=get_user_agent(request),
+            user_id=current_user,
+            extra_data={"contact_added": data.contact_username},
+        )
+
         # 📌 แจ้งเตือนแบบ Real-time (System Notification)
         # ส่งไปหา User B (contact_username) ว่า User A (current_user) แอดและเริ่มสนทนาแล้ว
         notification_payload = {
@@ -258,7 +346,21 @@ async def websocket_endpoint(websocket: WebSocket, username: str):
             
             # 📌 1. Data Flow & Encryption: บันทึกข้อความลง DB (ที่ใช้การเข้ารหัส Fernet อยู่แล้ว)
             database.save_message(sender=sender, receiver=receiver, content=content)
-            
+
+            # บันทึก Audit Log สำหรับการส่งข้อความ
+            # เก็บเฉพาะ Metadata (sender, receiver, timestamp) ไม่เก็บเนื้อหาข้อความ
+            # เพื่อความเป็นส่วนตัวตามหลัก Data Minimization (PDPA/GDPR)
+            # แต่ยังสามารถวิเคราะห์ความถี่และความสัมพันธ์ระหว่าง Digital Identity ได้
+            ws_ip = websocket.client.host if websocket.client else "unknown"
+            ws_ua = websocket.headers.get("user-agent", "unknown")
+            database.save_audit_log(
+                action=AuditAction.SEND_MESSAGE,
+                ip_address=ws_ip,
+                user_agent=ws_ua,
+                user_id=sender,
+                extra_data={"receiver": receiver, "content_length": len(content)},
+            )
+
             # 📌 2. ส่งข้อความแชทไปหาผู้รับ (Receiver) ตามปกติ (ถ้ากำลังออนไลน์)
             msg_to_send = {
                 "sender": sender,
@@ -283,6 +385,16 @@ async def websocket_endpoint(websocket: WebSocket, username: str):
                 
                 # ถ้าคะแนนต่ำกว่าเกณฑ์ ให้ส่ง SECURITY_FREEZE
                 if score < 0.95:
+                    # บันทึก Audit Log: ตรวจพบรูปแบบการเขียนผิดปกติ
+                    # เหตุการณ์นี้สำคัญมากสำหรับ Digital ID —
+                    # อาจหมายความว่ามีคนอื่นใช้บัญชีนี้ (Account Takeover)
+                    database.save_audit_log(
+                        action=AuditAction.STYLOMETRY_ALERT,
+                        ip_address=ws_ip,
+                        user_agent=ws_ua,
+                        user_id=sender,
+                        extra_data={"stylometry_score": round(score, 4), "threshold": 0.95},
+                    )
                     alert_payload = {
                         "type": "SECURITY_FREEZE",
                         "score": round(score, 4)

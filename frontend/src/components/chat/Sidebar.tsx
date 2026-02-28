@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../../store/useStore';
-import { Search, UserPlus, MoreVertical, User, LogOut } from 'lucide-react';
-import { motion } from 'framer-motion';
+import { Search, UserPlus, MoreVertical, User, LogOut, History } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import ActivityLogModal from './ActivityLogModal';
 
 /**
  * Sidebar สำหรับค้นหาเพื่อนและแสดงรายชื่อผู้ติดต่อ
@@ -11,6 +12,7 @@ const Sidebar: React.FC = () => {
     const [searchResults, setSearchResults] = useState<string[]>([]);
     const { currentUser, contacts, setContacts, activeContact, setActiveContact, clearStore } = useStore();
     const [isLoggingOut, setIsLoggingOut] = useState(false);
+    const [isActivityLogOpen, setIsActivityLogOpen] = useState(false);
 
     // ดึงรายชื่อผู้ติดต่อเมื่อโหลดหน้าจอ
     useEffect(() => {
@@ -102,6 +104,12 @@ const Sidebar: React.FC = () => {
     };
 
     return (
+        <>
+        <AnimatePresence>
+            {isActivityLogOpen && (
+                <ActivityLogModal onClose={() => setIsActivityLogOpen(false)} />
+            )}
+        </AnimatePresence>
         <div className="w-[300px] border-r border-tg-header flex flex-col bg-tg-sidebar shrink-0 relative">
 
             {/* 📌 1. User Profile Section (Top) */}
@@ -123,22 +131,27 @@ const Sidebar: React.FC = () => {
                     </div>
                 </div>
 
-                <div className="flex gap-2.5">
+                <div className="flex gap-2">
                     <button className="flex-1 bg-tg-header py-1.5 rounded-lg text-tg-text-secondary hover:text-white hover:bg-tg-accent/20 transition-all flex items-center justify-center text-xs font-medium border border-white/5">
                         <User size={14} className="mr-1.5" /> Profiles
                     </button>
                     <button
+                        onClick={() => setIsActivityLogOpen(true)}
+                        className="flex-1 bg-tg-header py-1.5 rounded-lg text-tg-text-secondary hover:text-white hover:bg-tg-accent/20 transition-all flex items-center justify-center text-xs font-medium border border-white/5"
+                        title="ประวัติการเข้าใช้งาน"
+                    >
+                        <History size={14} className="mr-1.5" /> Activity
+                    </button>
+                    <button
                         onClick={handleLogout}
                         disabled={isLoggingOut}
-                        className="bg-red-500/10 hover:bg-red-500/20 text-red-500 py-1.5 px-3 rounded-lg transition-all flex items-center justify-center text-xs font-medium border border-red-500/20 disabled:opacity-50"
+                        className="bg-red-500/10 hover:bg-red-500/20 text-red-500 py-1.5 px-2.5 rounded-lg transition-all flex items-center justify-center text-xs font-medium border border-red-500/20 disabled:opacity-50"
                         title="Logout"
                     >
                         {isLoggingOut ? (
                             <div className="w-3.5 h-3.5 border-2 border-red-500 border-t-transparent rounded-full animate-spin"></div>
                         ) : (
-                            <>
-                                <LogOut size={14} className="mr-1.5" /> ออกจากระบบ
-                            </>
+                            <LogOut size={14} />
                         )}
                     </button>
                 </div>
@@ -213,6 +226,7 @@ const Sidebar: React.FC = () => {
                 )}
             </div>
         </div>
+        </>
     );
 };
 
