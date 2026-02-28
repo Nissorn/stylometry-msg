@@ -6,6 +6,23 @@ import type { Message } from '../store/useStore';
  * Hook สำหรับจัดการ WebSocket Connection
  * รองระบการทำ Real-time Chat และ Security Alert (The Freeze Action)
  */
+/** เล่นเสียง Beep สั้นๆ ผ่าน Web Audio API (ไม่ต้องการไฟล์ภายนอก) */
+function playNotifBeep() {
+    try {
+        const ctx = new AudioContext();
+        const osc  = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(880, ctx.currentTime);
+        gain.gain.setValueAtTime(0.15, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.3);
+    } catch (_) { /* ไม่ต้องทำอะไร — browser อาจ block autoplay */ }
+}
+
 export const useChatWebSocket = (username: string | null) => {
     const socketRef = useRef<WebSocket | null>(null);
     const { addMessage, updateSecurity, incrementUnread } = useStore();
@@ -16,6 +33,15 @@ export const useChatWebSocket = (username: string | null) => {
         activeContactRef.current = useStore.getState().activeContact;
         return useStore.subscribe((state) => {
             activeContactRef.current = state.activeContact;
+        });
+    }, []);
+
+    // ติดตาม notifSound แบบ ref เพื่อให้ onmessage callback อ่านค่าล่าสุดเสมอ
+    const notifSoundRef = useRef<boolean>(useStore.getState().preferences.notifSound);
+    useEffect(() => {
+        notifSoundRef.current = useStore.getState().preferences.notifSound;
+        return useStore.subscribe((state) => {
+            notifSoundRef.current = state.preferences.notifSound;
         });
     }, []);
 
@@ -98,6 +124,7 @@ export const useChatWebSocket = (username: string | null) => {
                         activeContactRef.current !== chatPartner
                     ) {
                         incrementUnread(chatPartner);
+                        if (notifSoundRef.current) playNotifBeep();
                     }
                 }
 

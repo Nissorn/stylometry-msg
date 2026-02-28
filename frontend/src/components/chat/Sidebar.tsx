@@ -3,6 +3,7 @@ import { useStore } from '../../store/useStore';
 import { Search, UserPlus, MoreVertical, User, LogOut, History } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ActivityLogModal from './ActivityLogModal';
+import SettingsModal from './SettingsModal';
 
 /**
  * Sidebar สำหรับค้นหาเพื่อนและแสดงรายชื่อผู้ติดต่อ
@@ -13,6 +14,7 @@ const Sidebar: React.FC = () => {
     const { currentUser, contacts, setContacts, activeContact, setActiveContact, clearStore, unreadCounts, clearUnread } = useStore();
     const [isLoggingOut, setIsLoggingOut] = useState(false);
     const [isActivityLogOpen, setIsActivityLogOpen] = useState(false);
+    const [isSettingsOpen, setIsSettingsOpen]       = useState(false);
 
     // ดึงรายชื่อผู้ติดต่อเมื่อโหลดหน้าจอ
     useEffect(() => {
@@ -110,6 +112,14 @@ const Sidebar: React.FC = () => {
                 <ActivityLogModal onClose={() => setIsActivityLogOpen(false)} />
             )}
         </AnimatePresence>
+        <AnimatePresence>
+            {isSettingsOpen && (
+                <SettingsModal
+                    onClose={() => setIsSettingsOpen(false)}
+                    onOpenActivity={() => setIsActivityLogOpen(true)}
+                />
+            )}
+        </AnimatePresence>
         <div className="w-[300px] border-r border-tg-header flex flex-col bg-tg-sidebar shrink-0 relative">
 
             {/* 📌 1. User Profile Section (Top) */}
@@ -132,7 +142,9 @@ const Sidebar: React.FC = () => {
                 </div>
 
                 <div className="flex gap-2">
-                    <button className="flex-1 bg-tg-header py-1.5 rounded-lg text-tg-text-secondary hover:text-white hover:bg-tg-accent/20 transition-all flex items-center justify-center text-xs font-medium border border-white/5">
+                    <button
+                        onClick={() => setIsSettingsOpen(true)}
+                        className="flex-1 bg-tg-header py-1.5 rounded-lg text-tg-text-secondary hover:text-white hover:bg-tg-accent/20 transition-all flex items-center justify-center text-xs font-medium border border-white/5">
                         <User size={14} className="mr-1.5" /> Profiles
                     </button>
                     <button

@@ -11,6 +11,14 @@ import { useStore } from '../../store/useStore';
 const ChatContainer: React.FC = () => {
     const { currentUser, setCurrentUser } = useStore();
     const isFrozen = useStore((state) => state.security.isFrozen);
+    const fontSize  = useStore((state) => state.preferences.fontSize);
+
+    // ─── Apply font-size class to <html> whenever preference changes ───
+    useEffect(() => {
+        const el = document.documentElement;
+        el.classList.remove('font-small', 'font-medium', 'font-large');
+        el.classList.add(`font-${fontSize}`);
+    }, [fontSize]);
     const [isLoading, setIsLoading] = React.useState(true);
 
     // ตรวจสอบสถานะการ Login ผ่าน /api/me ทันทีที่โหลดหน้าจอ

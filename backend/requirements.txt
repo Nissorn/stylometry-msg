@@ -8,5 +8,3 @@ cryptography
 python-multipart
 pyotp
 qrcode[pil]
-httpx
-python-dotenv

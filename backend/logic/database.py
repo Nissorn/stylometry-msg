@@ -1,6 +1,5 @@
 import json
 import uuid
-import bcrypt
 from datetime import datetime
 from cryptography.fernet import Fernet
 import os
@@ -42,7 +41,6 @@ class AuditAction:
     MFA_VERIFY        = "MFA_VERIFY"          # ผ่านการตรวจสอบ TOTP ระหว่าง Login
     MFA_FAILED        = "MFA_FAILED"          # ป้อนรหัส TOTP ผิด (จับ Replay attack)
     ADAPTIVE_MFA      = "ADAPTIVE_MFA"        # ระบบบังคับ MFA เพราะตรวจพบ Device ใหม่
-    SPAM_ATTEMPT      = "SPAM_ATTEMPT"        # ผู้ใช้ Spam ส่งข้อความหา system_bot เร็วเกินไป (Rate Limit ถูกเรียกใช้)
 
 
 # audit_logs_db: ฐานข้อมูล In-memory สำหรับเก็บ Audit Log
@@ -72,11 +70,6 @@ def create_audit_log_table() -> None:
     # ล้างตารางและเริ่มใหม่ (ใช้ตอน startup เพื่อ reset state)
     global audit_logs_db
     audit_logs_db = []
-
-    # ─── สร้าง system_bot อัตโนมัติ ───
-    # system_bot เป็น Virtual User ที่ระบบสร้างขึ้นเพื่อเป็น Onboarding Bot
-    # ไม่มีใครล็อกอินด้วย account นี้ได้จริง (password เป็น random UUID)
-    ensure_system_bot()
 
 
 def save_audit_log(
@@ -150,35 +143,18 @@ def get_audit_logs(user_id: str | None = None, action: str | None = None) -> lis
 #   - รหัสผ่านอย่างเดียวไม่พอ — ป้องกัน Credential Stuffing
 #   - ตรวจจับการยึดบัญชี (Account Takeover) ด้วย Adaptive Auth
 
-def ensure_system_bot() -> None:
-    """
-    สร้าง Virtual User 'system_bot' ในฐานข้อมูล (ถ้ายังไม่มี)
-
-    system_bot คือ Stylometry Guardian Onboarding Bot
-    - ใช้ password แบบ random UUID hash → ไม่มีใคร Login ได้จริง
-    - ถูกสร้างโดยอัตโนมัติตอน Server Startup ผ่าน create_audit_log_table()
-    - จะถูกผูกเป็น Contact กับผู้ใช้ใหม่ทุกคนหลัง MFA Setup สำเร็จ
-      ผ่าน verify_and_enable_mfa() ทำให้บอทโผล่ที่ Sidebar ทันที
-    """
-    if "system_bot" not in users_db:
-        # สร้าง password แบบ random ที่ไม่มีใครรู้ — ป้องกันการ Login โดยตรง
-        random_pw = str(uuid.uuid4()).encode()
-        hashed = bcrypt.hashpw(random_pw, bcrypt.gensalt()).decode()
-        users_db["system_bot"] = {
-            "username":       "system_bot",
-            "password":       hashed,
-            "mfa_secret":     None,
-            "is_mfa_enabled": False,
-        }
-        contacts_db["system_bot"] = []
-
-
 def create_user(username, hashed_password):
     if username in users_db:
         return False
     users_db[username] = {
         "username":       username,
         "password":       hashed_password,
+        # display_name: ชื่อที่แสดงผลบนหน้าจอ — ผู้ใช้สามารถตั้งเองได้ในอนาคต
+        # ถ้าไม่มีให้ Fallback เป็น username
+        "display_name":   username,
+        # created_at: วันเวลาที่สร้างตัวตนดิจิทัลนี้ — ISO 8601 UTC
+        # ใช้แสดง "member_since" บนหน้า Profile และวิเคราะห์อายุบัญชี
+        "created_at":     datetime.utcnow().isoformat() + "Z",
         # mfa_secret: Shared Secret สำหรับคำนวณ TOTP
         # เก็บเป็น Base32 string — ควร Encrypt ด้วย Fernet ใน Production
         "mfa_secret":     None,
@@ -215,12 +191,6 @@ def verify_and_enable_mfa(username: str) -> bool:
     if not user or not user.get("mfa_secret"):
         return False
     user["is_mfa_enabled"] = True
-
-    # ─── Auto-Contact: ผูก system_bot เป็นเพื่อนอัตโนมัติ ───
-    # เมื่อผู้ใช้ผ่าน MFA Setup ครั้งแรก ระบบจะ add_contact ระหว่างผู้ใช้
-    # กับ system_bot เพื่อให้ Stylometry Guardian โผล่ที่หน้า Sidebar ทันที
-    # และเริ่มกระบวนการ Onboarding Calibration แบบ Real-time ได้เลย
-    add_contact(username, "system_bot")
     return True
 
 

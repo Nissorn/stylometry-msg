@@ -31,6 +31,30 @@ export interface SecurityState {
     ownerBaseline: MetaStats; // ค่า meta พื้นฐานของเจ้าของบัญชี
 }
 
+/**
+ * การตั้งค่าประสบการณ์ผู้ใช้ (เก็บใน localStorage, แชร์ผ่าน Store)
+ */
+export interface Preferences {
+    notifSound:   boolean; // เสียงแจ้งเตือนเมื่อได้รับข้อความใหม่
+    notifDesktop: boolean; // Desktop Notification
+    enterToSend:  boolean; // Enter เพื่อส่ง
+    fontSize:     'small' | 'medium' | 'large'; // ขนาดตัวอักษร
+}
+
+/** อ่านค่าเริ่มต้นจาก localStorage (ถ้าไม่มีใช้ default) */
+function loadPrefs(): Preferences {
+    const g = (k: string, def: string) => {
+        if (typeof localStorage === 'undefined') return def;
+        return localStorage.getItem(k) ?? def;
+    };
+    return {
+        notifSound:   g('pref_notif_sound',   'true')  !== 'false',
+        notifDesktop: g('pref_notif_desktop', 'false') === 'true',
+        enterToSend:  g('pref_enter_send',    'true')  !== 'false',
+        fontSize:     (g('pref_font_size', 'medium') as Preferences['fontSize']),
+    };
+}
+
 interface ChatStore {
     // Authentication
     currentUser: string | null;
@@ -48,9 +72,13 @@ interface ChatStore {
     setMessages: (chatPartner: string, msgs: Message[]) => void;
 
     // Unread Counts
-    unreadCounts: Record<string, number>; // Key = username | เพิ่มส่วนนี้
+    unreadCounts: Record<string, number>;
     incrementUnread: (chatPartner: string) => void;
     clearUnread: (chatPartner: string) => void;
+
+    // User Preferences
+    preferences: Preferences;
+    setPreference: <K extends keyof Preferences>(key: K, value: Preferences[K]) => void;
 
     // Security
     security: SecurityState;
@@ -58,7 +86,7 @@ interface ChatStore {
     resetSecurity: () => void;
 
     // ระบบ
-    clearStore: () => void; // ฟังก์ชันสำหรับล้างข้อมูลทั้งหมดตอน Logout
+    clearStore: () => void;
 }
 
 const initialMeta: MetaStats = {
@@ -111,6 +139,22 @@ export const useStore = create<ChatStore>((set) => ({
     clearUnread: (chatPartner) => set((state) => ({
         unreadCounts: { ...state.unreadCounts, [chatPartner]: 0 },
     })),
+
+    // ─── Preferences ───
+    preferences: loadPrefs(),
+    setPreference: (key, value) => {
+        // บันทึกลง localStorage ทันทีขณะที่อัปเดต Store
+        const lsKey: Record<keyof Preferences, string> = {
+            notifSound:   'pref_notif_sound',
+            notifDesktop: 'pref_notif_desktop',
+            enterToSend:  'pref_enter_send',
+            fontSize:     'pref_font_size',
+        };
+        localStorage.setItem(lsKey[key], String(value));
+        set((state) => ({
+            preferences: { ...state.preferences, [key]: value },
+        }));
+    },
 
     security: {
         trustScore: 1.0,
