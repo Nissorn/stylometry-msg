@@ -1,19 +1,102 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useStore } from '../../store/useStore';
 import { useChatWebSocket } from '../../hooks/useChatWebSocket';
-import { Send, Smile, Paperclip, Phone, Video, Info } from 'lucide-react';
+import { Send, Smile, Info } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 /**
  * หน้าต่างแชทหลัก (Center Column)
  */
 const ChatWindow: React.FC = () => {
-    const [inputText, setInputText] = useState('');
+    const [inputText, setInputText]     = useState('');
+    // ─── Bot Typing State ───────────────────────────────────────────────
+    // isBotTyping=true → ล็อค Input และแสดง Typing Indicator
+    // จะถูกรีเซ็ตเมื่อ system_bot ส่งข้อความตอบกลับมาใน messages
+    const [isBotTyping, setIsBotTyping] = useState(false);
+    const botTypingTimerRef             = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // เก็บจำนวน bot messages ก่อนส่ง เพื่อตรวจจับว่ามีข้อความใหม่หรือไม่
+    const prevBotMsgCountRef            = useRef<number>(0);
+    const [showEmojiPanel, setShowEmojiPanel] = useState(false);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+
     const { currentUser, activeContact, messages, security, setMessages } = useStore();
     const { sendMessage } = useChatWebSocket(currentUser);
     const scrollRef = useRef<HTMLDivElement>(null);
 
-    // ดึงประวัติแชทของคู่สนทนาที่ถูกเลือก
+    // ─── Emoji ที่ใช้บ่อยในการแชท ────────────────────────────────────────
+    const COMMON_EMOJIS = [
+        '😀','😂','🥹','😍','🥰','😎','🤔','😅','🙏','👍',
+        '❤️','🔥','✅','🎉','😭','💀','🫡','🤝','👀','💪',
+        '😤','🫠','🤣','😇','🥲','😏','🙄','😬','🤯','🥳',
+    ];
+
+    // ─── แทรก Emoji ลง textarea โดยใช้ execCommand (Native-style insert) ───
+    // execCommand('insertText') แทรก ณ ตำแหน่ง cursor จริง และรองรับ undo
+    // fallback: อัปเดต state โดยตรงถ้า execCommand ไม่ได้รับรอง (Firefox)
+    const handleInsertEmoji = (emoji: string) => {
+        const el = textareaRef.current;
+        if (!el) return;
+        el.focus();
+        const inserted = document.execCommand('insertText', false, emoji);
+        if (!inserted) {
+            // Fallback สำหรับ browser ที่ไม่รองรับ execCommand
+            const start = el.selectionStart ?? el.value.length;
+            const end   = el.selectionEnd   ?? el.value.length;
+            const next  = el.value.slice(0, start) + emoji + el.value.slice(end);
+            setInputText(next);
+            // คืน cursor ไปหลัง emoji
+            requestAnimationFrame(() => {
+                el.selectionStart = el.selectionEnd = start + emoji.length;
+            });
+        }
+        setShowEmojiPanel(false);
+    };
+
+    // ─── Debug: log สถานะ isBotTyping และจำนวนข้อความทุกครั้งที่ Render ───
+    const activeMsgs = activeContact ? (messages[activeContact] ?? []) : [];
+    console.log(
+        `[ChatWindow render] isBotTyping=${isBotTyping} msgs=${activeMsgs.length} contact=${activeContact}`
+    );
+
+    // ─── รีเซ็ต Typing State เมื่อเปลี่ยน contact ───────────────────────
+    useEffect(() => {
+        setIsBotTyping(false);
+        if (botTypingTimerRef.current) clearTimeout(botTypingTimerRef.current);
+        // Snapshot จำนวน bot messages ล่าสุดสำหรับ contact ใหม่
+        const botMsgs = activeContact
+            ? (messages[activeContact] ?? []).filter((m) => m.sender === 'system_bot')
+            : [];
+        prevBotMsgCountRef.current = botMsgs.length;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeContact]);
+
+    // ─── ตรวจจับ reply จาก system_bot เพื่อปลดล็อค Input ─────────────────
+    // Defensive: ตรวจว่า messages[activeContact] เป็น Array จริงและ
+    // เป็น contact กับ system_bot เท่านั้น
+    useEffect(() => {
+        if (activeContact !== 'system_bot') return;
+        if (!isBotTyping) return;
+
+        const raw = messages['system_bot'];
+        if (!Array.isArray(raw)) return;   // ← Null check: ยังไม่โหลดเสร็จ
+
+        const botMsgs = raw.filter((m) => m.sender === 'system_bot');
+        if (botMsgs.length > prevBotMsgCountRef.current) {
+            // บอทตอบแล้ว → ปลดล็อค
+            prevBotMsgCountRef.current = botMsgs.length;
+            setIsBotTyping(false);
+            if (botTypingTimerRef.current) clearTimeout(botTypingTimerRef.current);
+        }
+    }, [messages, activeContact, isBotTyping]);
+
+    // ─── Cleanup timer เมื่อ unmount ───────────────────────────────────
+    useEffect(() => {
+        return () => {
+            if (botTypingTimerRef.current) clearTimeout(botTypingTimerRef.current);
+        };
+    }, []);
+
+    // ─── โหลดประวัติแชทเมื่อเปลี่ยน contact ──────────────────────────
     useEffect(() => {
         if (!activeContact) return;
 
@@ -29,11 +112,10 @@ const ChatWindow: React.FC = () => {
 
                 if (response.ok) {
                     const data = await response.json();
-                    // แมปข้อมูลให้ตรงกับอินเทอร์เฟซ Message ก่อนบันทึกลง Zustand
-                    const fetchedMessages = data.messages.map((m: any) => ({
-                        sender: m.sender,
-                        content: m.content,
-                        timestamp: m.timestamp
+                    const fetchedMessages = (data.messages ?? []).map((m: any) => ({
+                        sender:    m.sender,
+                        content:   m.content,
+                        timestamp: m.timestamp,
                     }));
                     setMessages(activeContact, fetchedMessages);
                 }
@@ -45,18 +127,35 @@ const ChatWindow: React.FC = () => {
         fetchHistory();
     }, [activeContact, setMessages]);
 
-    // เลื่อนลงล่างสุดเมื่อมีข้อความใหม่
+    // ─── เลื่อนลงล่างสุดเมื่อมีข้อความหรือ Typing Indicator เปลี่ยน ───
     useEffect(() => {
         if (scrollRef.current) {
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
-    }, [messages, activeContact]);
+    }, [messages, activeContact, isBotTyping]);
 
+    // ─── ส่งข้อความ ─────────────────────────────────────────────────────
     const handleSend = (e?: React.FormEvent | React.KeyboardEvent) => {
         if (e) e.preventDefault();
-        if (inputText.trim() && activeContact && !security.isFrozen) {
-            sendMessage(activeContact, inputText);
-            setInputText(''); // เคลียร์ช่องแชทหลังจากส่งสำเร็จ
+        if (!inputText.trim() || !activeContact || security.isFrozen || isBotTyping) return;
+
+        sendMessage(activeContact, inputText);
+        setInputText('');
+
+        // ถ้าคุยกับบอท → ล็อค Input ทันทีจนกว่าจะได้รับ reply
+        if (activeContact === 'system_bot') {
+            const currentBotMsgs = (messages['system_bot'] ?? []).filter(
+                (m) => m.sender === 'system_bot'
+            );
+            prevBotMsgCountRef.current = currentBotMsgs.length;
+            setIsBotTyping(true);
+
+            // Safety fallback: ปลดล็อคอัตโนมัติหลัง 70 วินาที
+            // ป้องกัน UI ค้างหาก WebSocket หลุดหรือ LLM ไม่ตอบ
+            botTypingTimerRef.current = setTimeout(() => {
+                console.warn('[ChatWindow] Bot reply timeout — releasing lock');
+                setIsBotTyping(false);
+            }, 70_000);
         }
     };
 
@@ -70,7 +169,10 @@ const ChatWindow: React.FC = () => {
         );
     }
 
-    const currentChat = messages[activeContact] || [];
+    // Null-safe: messages[activeContact] อาจเป็น undefined ระหว่างโหลดหน้าแรก
+    const currentChat = Array.isArray(messages[activeContact])
+        ? messages[activeContact]!
+        : [];
 
     return (
         <div className="flex-1 flex flex-col bg-[#0e1621] relative border-r border-tg-header">
@@ -86,8 +188,6 @@ const ChatWindow: React.FC = () => {
                     </div>
                 </div>
                 <div className="flex items-center gap-5 text-tg-text-secondary">
-                    <Phone size={20} className="cursor-pointer hover:text-white transition-colors" />
-                    <Video size={20} className="cursor-pointer hover:text-white transition-colors" />
                     <Info size={20} className="cursor-pointer hover:text-white transition-colors" />
                 </div>
             </div>
@@ -119,35 +219,98 @@ const ChatWindow: React.FC = () => {
                         );
                     })}
                 </AnimatePresence>
+
+                {/* 🤖 Typing Indicator — แสดงเมื่อบอทกำลังประมวลผลจาก Typhoon API */}
+                <AnimatePresence>
+                    {isBotTyping && activeContact === 'system_bot' && (
+                        <motion.div
+                            key="bot-typing"
+                            initial={{ opacity: 0, y: 8 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 8 }}
+                            className="flex justify-start"
+                        >
+                            <div className="bg-tg-msg-in text-white rounded-2xl rounded-tl-none px-4 py-3 shadow-md flex items-center gap-1.5">
+                                <span className="text-xs text-white/60 mr-1">บอทกำลังพิมพ์...</span>
+                                {[0, 1, 2].map((i) => (
+                                    <motion.span
+                                        key={i}
+                                        className="w-2 h-2 bg-tg-accent rounded-full inline-block"
+                                        animate={{ y: [0, -5, 0] }}
+                                        transition={{
+                                            duration: 0.6,
+                                            repeat: Infinity,
+                                            delay: i * 0.15,
+                                            ease: 'easeInOut',
+                                        }}
+                                    />
+                                ))}
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
             </div>
 
             {/* Input Area */}
             <div className="p-4 bg-tg-sidebar border-t border-[#0f1721]">
+                {/* ─── Emoji Panel ─────────────────────────────────────────────── */}
+                <AnimatePresence>
+                    {showEmojiPanel && (
+                        <motion.div
+                            key="emoji-panel"
+                            initial={{ opacity: 0, y: 8, scale: 0.95 }}
+                            animate={{ opacity: 1, y: 0,  scale: 1    }}
+                            exit={{    opacity: 0, y: 8,  scale: 0.95 }}
+                            className="max-w-4xl mx-auto mb-2 bg-tg-header rounded-2xl p-3 grid grid-cols-10 gap-1 shadow-lg"
+                        >
+                            {COMMON_EMOJIS.map((emoji) => (
+                                <button
+                                    key={emoji}
+                                    type="button"
+                                    onClick={() => handleInsertEmoji(emoji)}
+                                    className="text-xl p-1 rounded-lg hover:bg-tg-sidebar transition-colors leading-none"
+                                >
+                                    {emoji}
+                                </button>
+                            ))}
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+
                 <form onSubmit={handleSend} className="max-w-4xl mx-auto flex items-end gap-2">
                     <div className="flex-1 bg-tg-header rounded-2xl p-2 flex items-end transition-all focus-within:ring-1 focus-within:ring-tg-accent shadow-inner">
-                        <button type="button" className="p-2 text-tg-text-secondary hover:text-tg-accent transition-colors">
+                        {/* ─── ปุ่ม Emoji: toggle panel ─── */}
+                        <button
+                            type="button"
+                            onClick={() => setShowEmojiPanel((v) => !v)}
+                            className={`p-2 transition-colors ${
+                                showEmojiPanel ? 'text-tg-accent' : 'text-tg-text-secondary hover:text-tg-accent'
+                            }`}
+                        >
                             <Smile size={24} />
                         </button>
                         <textarea
+                            ref={textareaRef}
                             rows={1}
-                            placeholder={security.isFrozen ? "ถูกล็อคชั่วคราว - กรุณายืนยันตัวตน" : "เขียนข้อความ..."}
+                            placeholder={
+                                security.isFrozen  ? 'ถูกล็อคชั่วคราว - กรุณายืนยันตัวตน' :
+                                isBotTyping        ? 'กรุณารอบอทตอบกลับ...' :
+                                'เขียนข้อความ...'
+                            }
                             className="flex-1 bg-transparent border-none outline-none py-2 px-2 text-tg-text resize-none max-h-32 disabled:opacity-50"
                             value={inputText}
                             onChange={(e) => setInputText(e.target.value)}
-                            disabled={security.isFrozen}
+                            disabled={security.isFrozen || isBotTyping}
                             onKeyDown={(e) => {
                                 if (e.key === 'Enter' && !e.shiftKey) {
                                     handleSend(e);
                                 }
                             }}
                         />
-                        <button type="button" className="p-2 text-tg-text-secondary hover:text-tg-accent transition-colors">
-                            <Paperclip size={24} />
-                        </button>
                     </div>
                     <button
                         type="submit"
-                        disabled={!inputText.trim() || security.isFrozen}
+                        disabled={!inputText.trim() || security.isFrozen || isBotTyping}
                         className="w-12 h-12 bg-tg-accent rounded-full flex items-center justify-center text-white hover:bg-opacity-90 transition-all disabled:opacity-50 active:scale-95 shadow-lg"
                     >
                         <Send size={22} className="ml-0.5" />

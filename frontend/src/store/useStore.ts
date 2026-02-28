@@ -47,6 +47,11 @@ interface ChatStore {
     addMessage: (chatPartner: string, msg: Message) => void;
     setMessages: (chatPartner: string, msgs: Message[]) => void;
 
+    // Unread Counts
+    unreadCounts: Record<string, number>; // Key = username | เพิ่มส่วนนี้
+    incrementUnread: (chatPartner: string) => void;
+    clearUnread: (chatPartner: string) => void;
+
     // Security
     security: SecurityState;
     updateSecurity: (updates: Partial<SecurityState>) => void;
@@ -95,6 +100,18 @@ export const useStore = create<ChatStore>((set) => ({
         },
     })),
 
+    // ─── Unread Counts ───
+    unreadCounts: {},
+    incrementUnread: (chatPartner) => set((state) => ({
+        unreadCounts: {
+            ...state.unreadCounts,
+            [chatPartner]: (state.unreadCounts[chatPartner] ?? 0) + 1,
+        },
+    })),
+    clearUnread: (chatPartner) => set((state) => ({
+        unreadCounts: { ...state.unreadCounts, [chatPartner]: 0 },
+    })),
+
     security: {
         trustScore: 1.0,
         messageWindow: 0,
@@ -120,6 +137,7 @@ export const useStore = create<ChatStore>((set) => ({
         contacts: [],
         activeContact: null,
         messages: {},
+        unreadCounts: {},
         security: {
             trustScore: 1.0,
             messageWindow: 0,

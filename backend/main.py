@@ -12,7 +12,10 @@ import io
 import base64
 import pyotp
 import qrcode
+import asyncio
+import time
 
+from logic import bot
 from logic import database, mock_ai
 from logic.database import AuditAction
 
@@ -22,6 +25,12 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
 app = FastAPI(title="Thai Stylometry V2 API")
+
+# ─── Rate Limiter สำหรับ Bot (ป้องกัน Spam) ────────────────────────────────────
+BOT_COOLDOWN_SECONDS: float = 5.0
+# Dict: {username -> Unix timestamp ของข้อความล่าสุดที่ส่งหา system_bot}
+# ใช้ In-memory แทน Redis เนื่องจาก Scope ของบอทเป็น Onboarding 5 ประโยค (ไม่ persistent)
+_bot_rate_limiter: dict[str, float] = {}
 
 # --------- STARTUP ---------
 @app.on_event("startup")
@@ -465,6 +474,16 @@ async def mfa_verify(request: Request, response: Response, data: MfaVerifyReques
         # เปิดใช้งาน MFA อย่างเป็นทางการหลังยืนยัน TOTP ครั้งแรกสำเร็จ
         database.verify_and_enable_mfa(username)
 
+        # ─── First Greeting: บันทึกข้อความแรกของบอทลง DB ทันที ───
+        # ทำให้ผู้ใช้เห็นข้อความจากบอทรออยู่ในแชททันทีที่เข้าหน้าแชทครั้งแรก
+        # โดยไม่ต้องรอให้ผู้ใช้พิมพ์อะไรก่อน
+        database.save_message(
+            sender="system_bot",
+            receiver=username,
+            content=bot.FALLBACK_GREETING,
+        )
+        print(f"🤖 Bot greeting saved for new user: {username}")
+
     # บันทึก Audit Log
     database.save_audit_log(
         action=audit_action,
@@ -572,6 +591,57 @@ async def get_chat_history(target_username: str, current_user: str = Depends(get
     messages = database.get_messages(current_user, target_username)
     return {"messages": messages}
 
+# ─────────────────────────────────────────────────────────────────
+# BOT REPLY HANDLER — ทำงานแบบ Background Task
+# ─────────────────────────────────────────────────────────────────
+async def _handle_bot_reply(sender: str, user_message: str) -> None:
+    """
+    Coroutine ที่ถูกเรียกผ่าน asyncio.create_task() เสมอ
+    เพื่อให้ Event Loop ของ WebSocket ไม่ถูกบล็อคระหว่างรอ LLM API
+
+    Flow:
+        1. ดึงประวัติแชทระหว่าง sender <-> system_bot จาก DB
+        2. ส่ง user_message + history ไปให้ bot.generate_typhoon_response()
+        3. บันทึกคำตอบของบอทลง DB (sender=system_bot, receiver=user)
+        4. ส่ง payload กลับไปที่ WebSocket ของ sender แบบ Real-time
+    """
+    try:
+        # ดึง history แล้ว filter เฉพาะก่อน user_message ล่าสุด
+        history = database.get_messages(sender, "system_bot")
+        # ตัดข้อความล่าสุด (ที่เพิ่งบันทึกไป) ออกก่อนส่ง context
+        # เพื่อหลีกเลี่ยงการส่ง user_message ซ้ำใน history + messages
+        history_without_last = history[:-1] if history else []
+
+        bot_text = await bot.generate_typhoon_response(
+            user_message=user_message,
+            chat_history=history_without_last,
+        )
+
+        # บันทึกคำตอบของบอทลง DB
+        database.save_message(
+            sender="system_bot",
+            receiver=sender,
+            content=bot_text,
+        )
+
+        # ส่งข้อความไปหาหน้าจอของ sender แบบ Real-time
+        bot_payload = {
+            "sender":    "system_bot",
+            "content":   bot_text,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        await manager.send_personal_message(json.dumps(bot_payload), sender)
+
+    except Exception as e:
+        # กรณีเกิดข้อผิดพลาดที่ไม่คาดคิด — แจ้งผู้ใช้เบาๆ
+        fallback = {
+            "sender":    "system_bot",
+            "content":   "ขออภัยครับ ระบบขัดข้องชั่วคราว กรุณาลองส่งข้อความอีกครั้ง 🙏",
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        await manager.send_personal_message(json.dumps(fallback), sender)
+
+
 # --------- WEBSOCKET CHAT ---------
 @app.websocket("/ws/chat/{username}")
 async def websocket_endpoint(websocket: WebSocket, username: str):
@@ -592,17 +662,113 @@ async def websocket_endpoint(websocket: WebSocket, username: str):
     try:
         while True:
             data = await websocket.receive_text()
-            payload = json.loads(data)
-            
+
+            # ─── Defensive JSON parse ────────────────────────────────────────
+            # json.loads() raises JSONDecodeError หาก client ส่ง payload ผิดรูปแบบ
+            # ถ้าไม่ catch จะหลุด loop ทั้งหมดจนการเชื่อมต่อถูกปิด
+            try:
+                payload = json.loads(data)
+            except json.JSONDecodeError:
+                print(f"⚠️  WebSocket ({username}): invalid JSON payload — skipping")
+                continue
+
             receiver = payload.get("receiver")
-            content = payload.get("content")
-            
+            content  = payload.get("content")
+
             if not receiver or not content:
                 continue
                 
             sender = username  # กำหนดชัดเจนว่า sender คือคนที่เชื่อมต่อท่อนี้
-            
-            # 📌 1. Data Flow & Encryption: บันทึกข้อความลง DB (ที่ใช้การเข้ารหัส Fernet อยู่แล้ว)
+
+            # ───────────────────────────────────────────────────
+            # 🤖 STYLOMETRY GUARDIAN: Onboarding Bot Integration
+            # ───────────────────────────────────────────────────
+            # เมื่อผู้ใช้ส่งข้อความหา system_bot ให้เบียง DB + เปิด async task
+            # เพื่อดึง LLM แล้วส่งกลับมาหาผู้ใช้แบบ Real-time
+            if receiver == "system_bot":
+                # ─── ดึง Client Metadata ก่อน (ใช้ร่วมกันทั้ง Rate Limiter และ Audit Log) ───
+                ws_ip = websocket.client.host if websocket.client else "unknown"
+                ws_ua = websocket.headers.get("user-agent", "unknown")
+
+                # ─── Rate Limiter: บังคับ Cooldown 5 วินาที เพื่อป้องกัน Spam ───────────────────
+                _now       = time.time()
+                _last      = _bot_rate_limiter.get(sender, 0.0)
+                _remaining = BOT_COOLDOWN_SECONDS - (_now - _last)
+
+                if _remaining > 0:
+                    # ── บันทึก SPAM_ATTEMPT Audit Log ──
+                    database.save_audit_log(
+                        action=AuditAction.SPAM_ATTEMPT,
+                        ip_address=ws_ip,
+                        user_agent=ws_ua,
+                        user_id=sender,
+                        extra_data={
+                            "receiver":           receiver,
+                            "cooldown_remaining": round(_remaining, 2),
+                        },
+                    )
+                    print(
+                        f"⚠️  SPAM_ATTEMPT from {sender} ({ws_ip}) "
+                        f"— cooldown: {_remaining:.1f}s remaining"
+                    )
+                    # ── ส่งข้อความแจ้งเตือนกลับไปหา User โดยตรง (ไม่บันทึก DB) ──
+                    await manager.send_personal_message(
+                        json.dumps({
+                            "sender":    "system_bot",
+                            "receiver":  sender,
+                            "content":   (
+                                f"⏳ กรุณารอสักครู่ครับ "
+                                f"(อีก {_remaining:.0f} วินาที)"
+                            ),
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }),
+                        sender,
+                    )
+                    continue  # ไม่ส่งต่อไปยัง LLM
+
+                # ผ่าน Rate Limit — อัปเดต timestamp ล่าสุด
+                _bot_rate_limiter[sender] = _now
+
+                # 1. บันทึกข้อความให้ DB ตามปกติ
+                database.save_message(sender=sender, receiver=receiver, content=content)
+
+                # 2. ใส่ deque เพื่อ Stylometry Calibration
+                user_dq = manager.user_message_windows[sender]
+                user_dq.append(content)
+
+                # 3. บันทึก Audit Log
+                database.save_audit_log(
+                    action=AuditAction.SEND_MESSAGE,
+                    ip_address=ws_ip,
+                    user_agent=ws_ua,
+                    user_id=sender,
+                    extra_data={"receiver": receiver, "content_length": len(content)},
+                )
+
+                # 4. ส่ง SECURITY_UPDATE กลับไปหา sender (เพื่ออัปเดต Radar Chart)
+                count = len(user_dq)
+                update_payload = {
+                    "type": "SECURITY_UPDATE",
+                    "count": count,
+                    "score": None,
+                }
+                await manager.send_personal_message(json.dumps(update_payload), sender)
+
+                # 5. ✨ asyncio.create_task() — หัวใจของการไม่บล็อค WebSocket
+                # ───────────────────────────────────────────────────
+                # การเรียก LLM API (เช่น Typhoon) ใช้เวลา I/O โดยตรง —
+                # ถ้าใช้ `await` ใอนลูป WebSocket จะทำให้ Event Loop
+                # ไม่รับข้อความอื่นๆ จากทุกผู้ใช้ระหว่างรอการตอบ
+                # create_task() ปล่อย coroutine ออกไปทำงานแบบส่วนส่วน
+                # WebSocket loop สามารถ receive_text() ต่อไปได้ทันที ระหว่างที่รอการตอบ
+                print(f"🤖 Processing message for system_bot from {sender}...")
+                asyncio.create_task(
+                    _handle_bot_reply(sender=sender, user_message=content)
+                )
+                continue   # ข้ามตรรกะ Stylometry Analysis ปกติสำหรับผู้ส่งที่เป็นบอท
+            # ─── สิ้นสุดส่วน Bot Logic ───
+
+            # 📌 1. Data Flow & Encryption: บันทึกข้อความลง DB (Fernet encryption)
             database.save_message(sender=sender, receiver=receiver, content=content)
 
             # บันทึก Audit Log สำหรับการส่งข้อความ

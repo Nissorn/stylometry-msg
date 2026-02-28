@@ -8,7 +8,16 @@ import type { Message } from '../store/useStore';
  */
 export const useChatWebSocket = (username: string | null) => {
     const socketRef = useRef<WebSocket | null>(null);
-    const { addMessage, updateSecurity } = useStore();
+    const { addMessage, updateSecurity, incrementUnread } = useStore();
+    // แยก activeContact ออกมาเป็น ref เพื่ออ่านค่าล่าสุดใน onmessage callback
+    // โดยไม่ทำให้ WebSocket ถูกตัดและต่อใหม่ทุกครั้งที่ activeContact เปลี่ยน
+    const activeContactRef = useRef<string | null>(null);
+    useEffect(() => {
+        activeContactRef.current = useStore.getState().activeContact;
+        return useStore.subscribe((state) => {
+            activeContactRef.current = state.activeContact;
+        });
+    }, []);
 
     const connect = useCallback(() => {
         if (!username || socketRef.current) return;
@@ -79,6 +88,17 @@ export const useChatWebSocket = (username: string | null) => {
                 const chatPartner = data.sender === username ? data.receiver : data.sender;
                 if (chatPartner) {
                     addMessage(chatPartner, newMessage);
+
+                    // ─── Unread Count Logic ──────────────────────────────────────────────
+                    // เพิ่ม unread เฉพาะกรณีที่:
+                    //   1) เป็นข้อความขาเข้า (ไม่ใช่ตัวเองเป็นคนส่ง)
+                    //   2) ผู้ใช้ไม่ได้เปิดห้องแชทนั้นอยู่
+                    if (
+                        data.sender !== username &&
+                        activeContactRef.current !== chatPartner
+                    ) {
+                        incrementUnread(chatPartner);
+                    }
                 }
 
                 // หมายเหตุ: การนับ Message Window ถูกย้ายไปใช้ event 'SECURITY_UPDATE' จาก Backend แล้ว
