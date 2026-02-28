@@ -109,6 +109,9 @@ FALLBACK_GREETING = (
     "เริ่มเลยนะครับ — คุณคิดว่า AI จะช่วยพัฒนาชีวิตประจำวันได้อย่างไรบ้าง?"
 )
 
+# Alias สำหรับ import จาก main.py ด้วย bot.SYSTEM_PROMPT_GREETING
+SYSTEM_PROMPT_GREETING = FALLBACK_GREETING
+
 FALLBACK_RESPONSE = (
     "ขอบคุณที่แชร์ครับ! ระบบได้บันทึก Stylometry ของคุณเรียบร้อยแล้ว 🎯\n"
     "ช่วยเล่าให้ฟังอีกสักเรื่องได้ไหมครับ? เช่น ประสบการณ์ใช้งานระบบความปลอดภัยออนไลน์ของคุณ"

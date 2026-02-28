@@ -5,6 +5,7 @@ from typing import Dict, List
 from collections import deque
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
+import asyncio
 import bcrypt
 import json
 import uuid
@@ -13,7 +14,7 @@ import base64
 import pyotp
 import qrcode
 
-from logic import database, mock_ai
+from logic import database, mock_ai, bot
 from logic.database import AuditAction
 
 # ตั้งค่า Security เบื้องต้น
@@ -31,6 +32,9 @@ async def startup_event():
     เพื่อให้มั่นใจว่าโครงสร้างตาราง Audit Log พร้อมใช้งานก่อน Request แรกเข้ามา
     """
     database.create_audit_log_table()
+    # สร้าง User system_bot ในฐานข้อมูลถ้ายังไม่มี
+    # (จำเป็นสำหรับ get_messages ที่ต้องการ user ทั้งสองฝั่งมีอยู่)
+    database.ensure_system_bot()
 
 # --------- AUDIT HELPERS ---------
 def get_client_ip(request: Request) -> str:
@@ -464,6 +468,15 @@ async def mfa_verify(request: Request, response: Response, data: MfaVerifyReques
     if session_type == "setup":
         # เปิดใช้งาน MFA อย่างเป็นทางการหลังยืนยัน TOTP ครั้งแรกสำเร็จ
         database.verify_and_enable_mfa(username)
+        # เพิ่ม system_bot เป็น Contact อัตโนมัติ เพื่อให้บอทปรากฏบน Sidebar เสมอ
+        database.add_contact(username, 'system_bot')
+        # บันทึกข้อความทักทายแรกจากบอทลง DB ทันที เพื่อให้หน้าบ้านเจอข้อความนี้
+        # ทันทีที่โหลดแชทครั้งแรก (ก่อน WebSocket ส่งอะไรเลย)
+        database.save_message(
+            sender='system_bot',
+            receiver=username,
+            content=bot.FALLBACK_GREETING,
+        )
 
     # บันทึก Audit Log
     database.save_audit_log(
@@ -631,9 +644,11 @@ async def websocket_endpoint(websocket: WebSocket, username: str):
             
             if not receiver or not content:
                 continue
-                
+
+            print(f"📡 WebSocket Received message for: {receiver}")
+
             sender = username  # กำหนดชัดเจนว่า sender คือคนที่เชื่อมต่อท่อนี้
-            
+
             # 📌 1. Data Flow & Encryption: บันทึกข้อความลง DB (ที่ใช้การเข้ารหัส Fernet อยู่แล้ว)
             database.save_message(sender=sender, receiver=receiver, content=content)
 
@@ -658,6 +673,25 @@ async def websocket_endpoint(websocket: WebSocket, username: str):
                 "timestamp": datetime.utcnow().isoformat()
             }
             await manager.send_personal_message(json.dumps(msg_to_send), receiver)
+
+            # 📌 2b. ถ้า receiver เป็น system_bot ให้เรียก LLM และส่งคำตอบกลับหา sender
+            if str(receiver).lower() == "system_bot":
+                # ดึงประวัติแชทระหว่าง sender กับ system_bot ก่อนข้อความนี้
+                chat_history = database.get_messages(sender, "system_bot")
+
+                async def _reply_as_bot(sndr: str = sender, user_msg: str = content,
+                                        history: list = chat_history):
+                    bot_reply = await bot.generate_typhoon_response(user_msg, history)
+                    ts = datetime.utcnow().isoformat()
+                    database.save_message(sender="system_bot", receiver=sndr, content=bot_reply)
+                    bot_payload = json.dumps({
+                        "sender": "system_bot",
+                        "content": bot_reply,
+                        "timestamp": ts,
+                    })
+                    await manager.send_personal_message(bot_payload, sndr)
+
+                asyncio.create_task(_reply_as_bot())
             
             # 📌 3. AI Logic Integration: กฎเหล็ก (STRICT RULE) ของการแยกคนส่ง-คนรับ
             # ระบบจะนำข้อความใส่เข้า deque ของ "sender" (คนที่พิมพ์ข้อความ) เท่านั้น

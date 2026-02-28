@@ -149,21 +149,31 @@ def create_user(username, hashed_password):
     users_db[username] = {
         "username":       username,
         "password":       hashed_password,
-        # display_name: ชื่อที่แสดงผลบนหน้าจอ — ผู้ใช้สามารถตั้งเองได้ในอนาคต
-        # ถ้าไม่มีให้ Fallback เป็น username
         "display_name":   username,
-        # created_at: วันเวลาที่สร้างตัวตนดิจิทัลนี้ — ISO 8601 UTC
-        # ใช้แสดง "member_since" บนหน้า Profile และวิเคราะห์อายุบัญชี
         "created_at":     datetime.utcnow().isoformat() + "Z",
-        # mfa_secret: Shared Secret สำหรับคำนวณ TOTP
-        # เก็บเป็น Base32 string — ควร Encrypt ด้วย Fernet ใน Production
         "mfa_secret":     None,
-        # is_mfa_enabled: True เมื่อผู้ใช้ยืนยัน TOTP ครั้งแรกสำเร็จแล้วเท่านั้น
-        # ป้องกัน Secret ที่ยังไม่ได้ยืนยันถูกใช้งานโดยไม่ตั้งใจ
         "is_mfa_enabled": False,
     }
     contacts_db[username] = []
     return True
+
+def ensure_system_bot():
+    """
+    สร้าง User 'system_bot' ในฐานข้อมูลถ้ายังไม่มี
+    จำเป็นต้องทำเพื่อให้ get_messages(user, 'system_bot') ทำงานได้
+    และป้องกันไม่ให้ KeyError / AttributeError เมื่อ save_message(ส่งหา system_bot)
+    """
+    if 'system_bot' not in users_db:
+        users_db['system_bot'] = {
+            "username":       "system_bot",
+            "password":       "",          # ไม่ต้อง Login จริง
+            "display_name":   "Stylometry Guardian 🛡️",
+            "created_at":     datetime.utcnow().isoformat() + "Z",
+            "mfa_secret":     None,
+            "is_mfa_enabled": False,
+        }
+    if 'system_bot' not in contacts_db:
+        contacts_db['system_bot'] = []
 
 def get_user(username):
     return users_db.get(username)

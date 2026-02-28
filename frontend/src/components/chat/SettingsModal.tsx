@@ -12,7 +12,7 @@ type Tab = 'profile' | 'privacy' | 'general';
 
 interface ProfileData {
     username: string;
-    created_at: string | null;
+    member_since: string | null;  // API returns 'member_since'
     is_mfa_enabled: boolean;
     contact_count: number;
 }
@@ -152,7 +152,7 @@ const SettingsModal: React.FC<Props> = ({ onClose, onOpenActivity }) => {
                                                 <div>
                                                     <div className="text-[11px] text-tg-text-secondary uppercase tracking-wide">สมาชิกตั้งแต่</div>
                                                     <div className="text-white text-sm font-medium">
-                                                        {formatDate(profile?.created_at ?? null)}
+                                                        {formatDate(profile?.member_since ?? null)}
                                                     </div>
                                                 </div>
                                             </div>

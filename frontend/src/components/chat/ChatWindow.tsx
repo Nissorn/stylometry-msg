@@ -159,6 +159,9 @@ const ChatWindow: React.FC = () => {
         }
     };
 
+    // Safety guard: messages store ยังไม่พร้อม (ป้องกันหน้าจอเทา)
+    if (!messages) return null;
+
     if (!activeContact) {
         return (
             <div className="flex-1 flex items-center justify-center bg-[#0e1621] text-tg-text-secondary select-none">
@@ -169,7 +172,8 @@ const ChatWindow: React.FC = () => {
         );
     }
 
-    // Null-safe: messages[activeContact] อาจเป็น undefined ระหว่างโหลดหน้าแรก
+    // แสดงทุกข้อความของห้องแชทนี้ (sender = ฉัน หรือ sender = คู่สนทนา)
+    // ไม่มีการ filter เพิ่มเติม — store แยกห้องตาม key ของ activeContact อยู่แล้ว
     const currentChat = Array.isArray(messages[activeContact])
         ? messages[activeContact]!
         : [];
