@@ -1,0 +1,96 @@
+# ==========================================
+# .gitignore สำหรับโปรเจกต์ Full-stack
+# FastAPI (Backend) + Astro (Frontend)
+# ==========================================
+
+
+# ------------------------------------------
+# Python / FastAPI
+# ป้องกันไฟล์ที่ Python สร้างขึ้นอัตโนมัติ
+# และไฟล์ที่มีข้อมูลสำคัญหลุดขึ้น GitHub
+# ------------------------------------------
+
+# ไฟล์ bytecode cache ที่ Python คอมไพล์ไว้
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment — ไม่ควร push ขึ้น repo
+venv/
+.venv/
+env/
+ENV/
+
+# ไฟล์ตัวแปรสภาพแวดล้อม เช่น API key, secret key
+.env
+.env.*
+!.env.example
+
+# ฐานข้อมูล SQLite ที่อยู่ใน local เครื่องเรา
+*.db
+*.sqlite3
+
+# ไฟล์ log ของ Python
+*.log
+
+# ไฟล์ที่เครื่องมือ packaging ของ Python สร้าง
+*.egg-info/
+dist/
+build/
+*.egg
+
+
+# ------------------------------------------
+# Node.js / Astro (Frontend)
+# ป้องกัน dependencies และไฟล์ build
+# ที่ไม่จำเป็นต้องเก็บใน repo
+# ------------------------------------------
+
+# โฟลเดอร์ packages ของ Node — ขนาดใหญ่มาก ติดตั้งใหม่ได้
+node_modules/
+
+# ผลลัพธ์จากการ build ของ Astro
+dist/
+.astro/
+
+# ไฟล์ cache ของ package manager
+.npm
+.yarn/cache
+.pnp.*
+
+
+# ------------------------------------------
+# ระบบปฏิบัติการ (OS)
+# ป้องกันไฟล์ metadata ของ OS หลุดขึ้น repo
+# ------------------------------------------
+
+# macOS — ไฟล์ metadata ที่ Finder สร้างอัตโนมัติ
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows — ไฟล์ metadata ของ Windows Explorer
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux — ไฟล์ backup ของบางโปรแกรม
+*~
+
+
+# ------------------------------------------
+# IDE และ Editor
+# ป้องกันการตั้งค่าส่วนตัวของ editor หลุด
+# ------------------------------------------
+
+# VS Code (เก็บเฉพาะ settings ที่แชร์ได้)
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# JetBrains IDEs
+.idea/
+
+# Vim / Neovim
+*.swp
+*.swo
