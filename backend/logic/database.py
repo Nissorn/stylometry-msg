@@ -37,6 +37,10 @@ class AuditAction:
 
     # ----- Security Events (เหตุการณ์ด้านความปลอดภัย) -----
     STYLOMETRY_ALERT  = "STYLOMETRY_ALERT"    # ระบบตรวจพบรูปแบบการเขียนผิดปกติ
+    MFA_SETUP         = "MFA_SETUP"           # ผู้ใช้เปิดใช้งาน TOTP สำเร็จครั้งแรก
+    MFA_VERIFY        = "MFA_VERIFY"          # ผ่านการตรวจสอบ TOTP ระหว่าง Login
+    MFA_FAILED        = "MFA_FAILED"          # ป้อนรหัส TOTP ผิด (จับ Replay attack)
+    ADAPTIVE_MFA      = "ADAPTIVE_MFA"        # ระบบบังคับ MFA เพราะตรวจพบ Device ใหม่
 
 
 # audit_logs_db: ฐานข้อมูล In-memory สำหรับเก็บ Audit Log
@@ -118,15 +122,88 @@ def get_audit_logs(user_id: str | None = None, action: str | None = None) -> lis
         result = [l for l in result if l["action"] == action]
     return result
 
+# ==========================================
+# MFA — Multi-Factor Authentication (TOTP)
+# ==========================================
+#
+# หลักการ Shared Secret ใน TOTP (Time-based One-Time Password)
+# ──────────────────────────────────────────────────────────────
+# TOTP ทำงานบนหลักการ "Shared Secret" กล่าวคือ:
+#   1. ตอน Setup: Server สุ่มสร้าง Secret Key (Base32 string) แล้วส่งให้ผู้ใช้
+#      ผ่าน QR Code — ผู้ใช้นำไปสแกนใน Authenticator App (Google/Authy)
+#   2. ทั้ง Server และ App ต่างมี Secret Key ชุดเดียวกัน + เวลาปัจจุบัน (UTC)
+#   3. เมื่อต้องการยืนยัน: App คำนวณ HMAC-SHA1(secret, floor(time/30))  → รหัส 6 หลัก
+#      Server คำนวณค่าเดิมอิสระ แล้วเปรียบเทียบ
+#   4. รหัสมีอายุ 30 วินาที — แม้ดักจับได้ก็ใช้ซ้ำไม่ได้ (Replay-resistant)
+#   5. Secret ถูกเก็บบน Server (Encrypted ใน Production) และใน App ของผู้ใช้
+#      ไม่มีการส่ง Secret ผ่านเครือข่ายอีกหลังจาก Setup ครั้งแรก
+#
+# ประโยชน์ต่อ Digital ID:
+#   - พิสูจน์ความเป็นเจ้าของ Device จริง ๆ (Something You Have)
+#   - รหัสผ่านอย่างเดียวไม่พอ — ป้องกัน Credential Stuffing
+#   - ตรวจจับการยึดบัญชี (Account Takeover) ด้วย Adaptive Auth
+
 def create_user(username, hashed_password):
     if username in users_db:
         return False
-    users_db[username] = {"username": username, "password": hashed_password}
+    users_db[username] = {
+        "username":       username,
+        "password":       hashed_password,
+        # mfa_secret: Shared Secret สำหรับคำนวณ TOTP
+        # เก็บเป็น Base32 string — ควร Encrypt ด้วย Fernet ใน Production
+        "mfa_secret":     None,
+        # is_mfa_enabled: True เมื่อผู้ใช้ยืนยัน TOTP ครั้งแรกสำเร็จแล้วเท่านั้น
+        # ป้องกัน Secret ที่ยังไม่ได้ยืนยันถูกใช้งานโดยไม่ตั้งใจ
+        "is_mfa_enabled": False,
+    }
     contacts_db[username] = []
     return True
 
 def get_user(username):
     return users_db.get(username)
+
+
+def set_mfa_secret(username: str, secret: str) -> bool:
+    """
+    บันทึก TOTP Shared Secret ลงในข้อมูลผู้ใช้ (ยังไม่เปิดใช้งาน)
+    ต้องรอ verify_and_enable_mfa() สำเร็จก่อน จึงจะถือว่า MFA พร้อมใช้
+    """
+    user = users_db.get(username)
+    if not user:
+        return False
+    user["mfa_secret"] = secret
+    return True
+
+
+def verify_and_enable_mfa(username: str) -> bool:
+    """
+    เปลี่ยน is_mfa_enabled = True หลังผู้ใช้ยืนยัน TOTP ครั้งแรกสำเร็จ
+    การแยก set_secret / enable เป็น 2 ขั้นเพื่อป้องกัน Secret ที่ไม่ผ่านการยืนยัน
+    ถูกนำไปใช้ล็อก Account ผู้ใช้โดยปราศจากความตั้งใจ
+    """
+    user = users_db.get(username)
+    if not user or not user.get("mfa_secret"):
+        return False
+    user["is_mfa_enabled"] = True
+    return True
+
+
+def get_known_devices(username: str) -> tuple[set[str], set[str]]:
+    """
+    ดึง IP Address และ User-Agent ที่เคย Login สำเร็จมาก่อน
+    ใช้สำหรับ Adaptive Authentication — ตรวจสอบว่า Device ปัจจุบัน
+    เคยปรากฏในประวัติ LOGIN_SUCCESS ของผู้ใช้คนนี้หรือไม่
+
+    Returns:
+        (known_ips, known_user_agents) — set ของค่าที่เคยพบ
+    """
+    success_logs = [
+        log for log in audit_logs_db
+        if log["user_id"] == username and log["action"] == AuditAction.LOGIN_SUCCESS
+    ]
+    known_ips = {log["ip_address"] for log in success_logs}
+    known_uas = {log["user_agent"]  for log in success_logs}
+    return known_ips, known_uas
 
 def get_all_users():
     return list(users_db.keys())

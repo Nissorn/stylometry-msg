@@ -6,3 +6,5 @@ passlib[bcrypt]
 bcrypt
 cryptography
 python-multipart
+pyotp
+qrcode[pil]

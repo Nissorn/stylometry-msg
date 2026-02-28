@@ -7,6 +7,11 @@ from datetime import datetime, timedelta
 from jose import JWTError, jwt
 import bcrypt
 import json
+import uuid
+import io
+import base64
+import pyotp
+import qrcode
 
 from logic import database, mock_ai
 from logic.database import AuditAction
@@ -171,6 +176,43 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# ========================================
+# MFA PENDING SESSIONS
+# ========================================
+# pending_mfa_sessions: เก็บ Session ชั่วคราวที่รอการยืนยัน TOTP
+# Key   = UUID token (ส่งกลับให้ Frontend)
+# Value = {"username": str, "type": "login" | "setup"}
+#
+# "login"  — ผู้ใช้ผ่านรหัสผ่านแล้ว รอใส่ TOTP ก่อนรับ JWT
+# "setup"  — ผู้ใช้เพิ่งสมัคร รอ Scan QR และยืนยัน TOTP ครั้งแรก
+#
+# Token มีอายุสั้น (ควร expire ใน Production) เพื่อป้องกัน
+# การนำ Session Token เก่าที่ยังไม่ verified มาใช้ซ้ำ
+MFA_APP_NAME = "ThaiStylometryDID"
+pending_mfa_sessions: Dict[str, dict] = {}
+
+
+def _create_mfa_session(username: str, session_type: str) -> str:
+    """สร้าง UUID token สำหรับ MFA Session และบันทึกลง pending_mfa_sessions"""
+    token = str(uuid.uuid4())
+    pending_mfa_sessions[token] = {"username": username, "type": session_type}
+    return token
+
+
+def _pop_mfa_session(token: str, expected_type: str) -> str:
+    """
+    ดึงและลบ MFA Session ออกจาก dict
+    Single-use: ใช้ครั้งเดียวแล้วหมดอายุทันที ป้องกัน Token Reuse
+    """
+    session = pending_mfa_sessions.pop(token, None)
+    if not session or session["type"] != expected_type:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired MFA session token",
+        )
+    return session["username"]
+
+
 # --------- REST API ENDPOINTS ---------
 
 from pydantic import BaseModel
@@ -180,6 +222,13 @@ class AuthModel(BaseModel):
 
 class ContactAdd(BaseModel):
     contact_username: str
+
+class MfaSetupRequest(BaseModel):
+    setup_token: str   # UUID ที่ได้จาก /api/register
+
+class MfaVerifyRequest(BaseModel):
+    token: str         # UUID ที่ได้จาก /api/register (setup) หรือ /api/login (login)
+    code: str          # รหัส TOTP 6 หลักจาก Authenticator App
 
 @app.post("/api/register")
 async def register(request: Request, user: AuthModel):
@@ -193,7 +242,15 @@ async def register(request: Request, user: AuthModel):
             user_agent=get_user_agent(request),
             user_id=user.username,
         )
-        return {"msg": "User created successfully"}
+        # MFA บังคับ: สร้าง setup_token ส่งกลับไปให้ Frontend
+        # Frontend ต้องนำ setup_token ไปเรียก /api/auth/mfa/setup เพื่อสร้าง QR Code
+        # จนกว่าจะ verify สำเร็จ ผู้ใช้จะยังไม่ได้รับ JWT Cookie
+        setup_token = _create_mfa_session(user.username, "setup")
+        return {
+            "msg": "User created successfully",
+            "mfa_setup_required": True,
+            "setup_token": setup_token,
+        }
     raise HTTPException(status_code=400, detail="Username already exists")
 
 @app.post("/api/login")
@@ -214,18 +271,71 @@ async def login(request: Request, response: Response, form_data: OAuth2PasswordR
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
         )
-    
+
+    current_ip = get_client_ip(request)
+    current_ua = get_user_agent(request)
+
+    # ---- Adaptive Authentication ----
+    # เปรียบเทียบ IP และ User-Agent ปัจจุบันกับประวัติ LOGIN_SUCCESS
+    # ถ้าพบว่าเป็น Device/Network ที่ไม่เคยเห็นมาก่อน → บังคับ MFA
+    # เหตุผล: แม้รหัสผ่านจะถูกต้อง แต่ Device ใหม่อาจหมายความว่า
+    #   1. Credential ถูกขโมยและนำไปใช้บน Device อื่น
+    #   2. ผู้ใช้ถูก Phishing แล้วมีคนอื่น Login แทน
+    known_ips, known_uas = database.get_known_devices(form_data.username)
+    is_new_device = (current_ip not in known_ips) or (current_ua not in known_uas)
+
+    mfa_required = user.get("is_mfa_enabled", False) or is_new_device
+
+    if mfa_required:
+        if is_new_device and not user.get("is_mfa_enabled", False):
+            # Adaptive Auth: Device ใหม่ แต่ยังไม่ได้เปิด MFA
+            # บันทึกเหตุการณ์ไว้เพื่อ Audit และแจ้ง Frontend ให้ Setup MFA ก่อน
+            database.save_audit_log(
+                action=AuditAction.ADAPTIVE_MFA,
+                ip_address=current_ip,
+                user_agent=current_ua,
+                user_id=user["username"],
+                extra_data={"reason": "new_device_detected", "mfa_enabled": False},
+            )
+            # สร้าง setup_token ให้ผู้ใช้ไป Setup MFA ก่อน
+            setup_token = _create_mfa_session(user["username"], "setup")
+            return {
+                "mfa_required": True,
+                "adaptive_auth": True,
+                "mfa_enabled": False,
+                "setup_token": setup_token,
+                "msg": "New device detected. Please set up MFA before proceeding.",
+            }
+
+        # MFA เปิดอยู่ (หรือ is_new_device + mfa_enabled) → ออก session_token เพื่อรอ TOTP
+        # ยังไม่ Set Cookie — รอให้ผ่าน /api/auth/mfa/verify ก่อน
+        if is_new_device:
+            database.save_audit_log(
+                action=AuditAction.ADAPTIVE_MFA,
+                ip_address=current_ip,
+                user_agent=current_ua,
+                user_id=user["username"],
+                extra_data={"reason": "new_device_detected", "mfa_enabled": True},
+            )
+        session_token = _create_mfa_session(user["username"], "login")
+        return {
+            "mfa_required": True,
+            "adaptive_auth": is_new_device,
+            "session_token": session_token,
+        }
+
+    # ---- Login สำเร็จ ไม่ต้อง MFA ----
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user["username"]}, expires_delta=access_token_expires
     )
-    
+
     # บันทึก: การ Login สำเร็จ — ยืนยันตัวตนถูกต้อง
     # ใช้ติดตาม Session ใหม่และวิเคราะห์ Pattern เวลาการเข้าใช้งาน (Time-based Anomaly)
     database.save_audit_log(
         action=AuditAction.LOGIN_SUCCESS,
-        ip_address=get_client_ip(request),
-        user_agent=get_user_agent(request),
+        ip_address=current_ip,
+        user_agent=current_ua,
         user_id=user["username"],
     )
 
@@ -240,6 +350,154 @@ async def login(request: Request, response: Response, form_data: OAuth2PasswordR
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     )
     return {"msg": "Login successful"}
+
+@app.post("/api/logout")
+async def logout(response: Response):
+    response.delete_cookie("access_token")
+    return {"msg": "Logout successful"}
+
+# ========================================
+# MFA ENDPOINTS
+# ========================================
+
+@app.post("/api/auth/mfa/setup")
+async def mfa_setup(data: MfaSetupRequest):
+    """
+    Step 1 ของ MFA Setup: สร้าง TOTP Secret และคืน QR Code
+
+    Flow:
+      1. ตรวจสอบ setup_token จาก pending_mfa_sessions
+      2. สร้าง Shared Secret ด้วย pyotp.random_base32()
+      3. บันทึก Secret ลงข้อมูลผู้ใช้ (ยังไม่ enable — รอ verify)
+      4. สร้าง otpauth:// URL → วาด QR Code → แปลงเป็น Base64 PNG
+      5. คืนค่า: { qr_code_base64, secret } ให้ Frontend แสดงผล
+
+    หมายเหตุ: ไม่ expire setup_token ที่นี่ — ยังต้องใช้ใน /api/auth/mfa/verify
+    จึงเก็บ token ไว้ใน pending_mfa_sessions จนกว่าจะ verify สำเร็จ
+    """
+    # ค้นหา session โดยไม่ pop (ยังต้องใช้ใน verify)
+    session = pending_mfa_sessions.get(data.setup_token)
+    if not session or session["type"] != "setup":
+        raise HTTPException(status_code=400, detail="Invalid or expired setup token")
+
+    username = session["username"]
+    user = database.get_user(username)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # สร้าง Shared Secret: Base32 string ขนาด 32 chars (160 bits)
+    # Secret นี้จะถูกแชร์ระหว่าง Server และ Authenticator App ของผู้ใช้
+    # ใน Production ควรเข้ารหัสด้วย Fernet ก่อนบันทึกลง Database
+    secret = pyotp.random_base32()
+    database.set_mfa_secret(username, secret)
+
+    # สร้าง otpauth:// URI มาตรฐาน RFC 6238
+    # Format: otpauth://totp/<AppName>:<username>?secret=<secret>&issuer=<AppName>
+    # URI นี้คือข้อมูลที่ QR Code เข้ารหัสไว้ — Authenticator App จะอ่านและบันทึก Secret
+    totp_uri = pyotp.totp.TOTP(secret).provisioning_uri(
+        name=username,
+        issuer_name=MFA_APP_NAME,
+    )
+
+    # วาด QR Code และแปลงเป็น Base64 PNG สำหรับส่งไปยัง Frontend
+    qr_img = qrcode.make(totp_uri)
+    buffer = io.BytesIO()
+    qr_img.save(buffer, format="PNG")
+    qr_b64 = base64.b64encode(buffer.getvalue()).decode()
+
+    return {
+        "qr_code_base64": qr_b64,      # ใช้ใน <img src="data:image/png;base64,...">
+        "secret": secret,              # แสดงเป็น Backup Code ให้ผู้ใช้บันทึกไว้
+        "issuer": MFA_APP_NAME,
+    }
+
+
+@app.post("/api/auth/mfa/verify")
+async def mfa_verify(request: Request, response: Response, data: MfaVerifyRequest):
+    """
+    ยืนยัน TOTP Code และ Complete MFA Flow (Setup หรือ Login)
+
+    สำหรับ type="setup":
+      - ตรวจสอบ TOTP ครั้งแรก → เปิดใช้งาน MFA → ออก JWT Cookie
+      - บันทึก MFA_SETUP ใน Audit Log
+
+    สำหรับ type="login":
+      - ตรวจสอบ TOTP → ออก JWT Cookie
+      - บันทึก MFA_VERIFY + LOGIN_SUCCESS ใน Audit Log
+
+    หลักการ TOTP Verification:
+      pyotp.TOTP(secret).verify(code) จะ:
+        1. คำนวณรหัสที่ถูกต้อง ณ เวลาปัจจุบัน (±1 window = ±30 วิ)
+        2. เปรียบเทียบแบบ Constant-time (ป้องกัน Timing Attack)
+        3. คืนค่า True ถ้าตรงกัน
+    """
+    # ตรวจสอบว่า token เป็น "setup" หรือ "login"
+    session = pending_mfa_sessions.get(data.token)
+    if not session:
+        raise HTTPException(status_code=400, detail="Invalid or expired MFA token")
+
+    session_type = session["type"]
+    if session_type not in ("setup", "login"):
+        raise HTTPException(status_code=400, detail="Invalid session type")
+
+    # ดึง username แล้ว pop session ออก (Single-use token)
+    username = _pop_mfa_session(data.token, session_type)
+    user = database.get_user(username)
+    if not user or not user.get("mfa_secret"):
+        raise HTTPException(status_code=400, detail="MFA not configured for this user")
+
+    # ตรวจสอบ TOTP code ด้วย Shared Secret
+    totp = pyotp.TOTP(user["mfa_secret"])
+    if not totp.verify(data.code, valid_window=1):
+        # บันทึก: TOTP ล้มเหลว — อาจเป็น Replay Attack หรือนาฬิกาผิดเวลา
+        database.save_audit_log(
+            action=AuditAction.MFA_FAILED,
+            ip_address=get_client_ip(request),
+            user_agent=get_user_agent(request),
+            user_id=username,
+            extra_data={"session_type": session_type},
+        )
+        raise HTTPException(status_code=400, detail="Invalid TOTP code")
+
+    audit_action = AuditAction.MFA_SETUP if session_type == "setup" else AuditAction.MFA_VERIFY
+
+    if session_type == "setup":
+        # เปิดใช้งาน MFA อย่างเป็นทางการหลังยืนยัน TOTP ครั้งแรกสำเร็จ
+        database.verify_and_enable_mfa(username)
+
+    # บันทึก Audit Log
+    database.save_audit_log(
+        action=audit_action,
+        ip_address=get_client_ip(request),
+        user_agent=get_user_agent(request),
+        user_id=username,
+        extra_data={"session_type": session_type},
+    )
+    # บันทึก LOGIN_SUCCESS ด้วยสำหรับ flow login
+    if session_type == "login":
+        database.save_audit_log(
+            action=AuditAction.LOGIN_SUCCESS,
+            ip_address=get_client_ip(request),
+            user_agent=get_user_agent(request),
+            user_id=username,
+            extra_data={"via": "mfa_verify"},
+        )
+
+    # ออก JWT Cookie หลังผ่าน TOTP
+    access_token = create_access_token(
+        data={"sub": username},
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+    response.set_cookie(
+        key="access_token",
+        value=f"Bearer {access_token}",
+        httponly=True,
+        secure=False,
+        samesite="lax",
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    )
+    return {"msg": "MFA verified. Login successful.", "mfa_setup_complete": session_type == "setup"}
+
 
 @app.post("/api/logout")
 async def logout(response: Response):
