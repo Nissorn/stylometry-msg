@@ -1,0 +1,258 @@
+---
+title: Security Dashboard
+description: อธิบาย UI หน้าตั้งค่าด้านความปลอดภัยที่ให้ผู้ใช้ตรวจสอบ Audit Logs ของตนเอง ติดตาม Trust Score และดูความคืบหน้าของ AI Calibration แบบ Real-time
+---
+
+import { Aside, Card, CardGrid, Steps } from '@astrojs/starlight/components';
+
+## แนวคิด Security Transparency
+
+ระบบส่วนใหญ่ทำงาน Security ที่ "ซ่อนเร้น" ผู้ใช้ไม่รู้ว่าระบบกำลังทำอะไรกับข้อมูลของตน **Thai-Stylometry V2** แก้ปัญหานี้ด้วยหลักการ **Security Transparency** — ให้ผู้ใช้เห็นข้อมูลความปลอดภัยของตนเองได้เต็มที่
+
+<Aside type="note" title="สิทธิ์ในการรู้ (Right to Know)">
+หลักการนี้สอดคล้องกับ GDPR Article 15 (Right of Access) — ผู้ใช้มีสิทธิ์รู้ว่าระบบเก็บข้อมูลอะไรของตน และข้อมูลนั้นถูกใช้อย่างไร Security Dashboard คือเครื่องมือที่ทำให้สิทธิ์นี้เป็นจริง
+</Aside>
+
+## ส่วนประกอบของ Security Dashboard
+
+Dashboard ถูก Implement เป็น React Component (`SecurityDashboard.tsx`) ที่แสดงข้อมูล 4 ส่วนหลัก:
+
+### 1. AI Calibration Progress Bar
+
+```typescript
+// SecurityDashboard.tsx (Conceptual)
+interface CalibrationStatus {
+  calibrated: boolean;
+  message_count: number;
+  required_count: number;  // = 5
+  baseline_created_at?: string;
+}
+
+function CalibrationProgress({ status }: { status: CalibrationStatus }) {
+  const progress = Math.min(
+    (status.message_count / status.required_count) * 100, 
+    100
+  );
+  
+  return (
+    <div className="calibration-section">
+      <h3>AI Identity Baseline</h3>
+      
+      {/* Progress Bar */}
+      <div className="progress-bar-container">
+        <div 
+          className="progress-bar-fill"
+          style={{ width: `${progress}%` }}
+          role="progressbar"
+          aria-valuenow={progress}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        />
+      </div>
+      
+      <p>
+        {status.calibrated 
+          ? `✓ Calibration เสร็จสมบูรณ์ (${status.message_count} ข้อความ)`
+          : `กำลัง Calibrate: ${status.message_count}/${status.required_count} ข้อความ`
+        }
+      </p>
+    </div>
+  );
+}
+```
+
+**ข้อมูลที่แสดง:**
+- แถบ Progress แสดงเปอร์เซ็นต์ความคืบหน้า (จาก 0% ถึง 100%)
+- จำนวนข้อความที่เก็บแล้ว / จำนวนที่ต้องการ (5 ข้อความ)
+- วันที่และเวลาที่ Baseline ถูกสร้าง (ถ้า Calibrate แล้ว)
+- สถานะ: `กำลัง Calibrate` หรือ `✓ พร้อมใช้งาน`
+
+### 2. Trust Score History
+
+```typescript
+interface TrustScoreEntry {
+  timestamp: string;
+  score: number;       // 0.0 - 1.0
+  status: "TRUSTED" | "SUSPICIOUS" | "UNTRUSTED";
+  message_batch: number;
+}
+
+function TrustScoreHistory({ history }: { history: TrustScoreEntry[] }) {
+  return (
+    <div className="trust-score-section">
+      <h3>ประวัติ Trust Score</h3>
+      <div className="score-chart">
+        {/* Mini Line Chart แสดงแนวโน้ม Trust Score ย้อนหลัง */}
+        {history.map(entry => (
+          <div 
+            key={entry.timestamp}
+            className={`score-dot score-${entry.status.toLowerCase()}`}
+            title={`${entry.score.toFixed(2)} - ${entry.timestamp}`}
+          />
+        ))}
+      </div>
+      
+      {/* ค่าล่าสุด */}
+      <div className="latest-score">
+        <span>Trust Score ล่าสุด: </span>
+        <strong className={`score-${history[0]?.status?.toLowerCase()}`}>
+          {(history[0]?.score * 100).toFixed(0)}%
+        </strong>
+      </div>
+    </div>
+  );
+}
+```
+
+### 3. Audit Log Viewer
+
+ส่วนที่สำคัญที่สุดของ Dashboard — แสดงประวัติการเข้าระบบและเหตุการณ์ด้านความปลอดภัยทั้งหมด:
+
+```typescript
+// ตัวอย่าง API Endpoint สำหรับ Audit Logs
+// GET /users/me/audit-logs?limit=20&offset=0
+
+interface AuditLogEntry {
+  id: string;
+  action: string;
+  ip_address: string;
+  user_agent: string;
+  timestamp: string;
+  risk_score: number;
+  metadata: Record<string, unknown>;
+}
+```
+
+**ข้อมูลที่แสดงในตาราง:**
+
+| คอลัมน์ | รายละเอียด |
+|---|---|
+| วันที่/เวลา | Timestamp ของเหตุการณ์ (Local Timezone) |
+| การกระทำ | Action Code เช่น "เข้าสู่ระบบสำเร็จ", "OTP ผิด" |
+| IP Address | IP ที่ใช้เข้าถึง (Partially masked: `203.150.82.xxx`) |
+| อุปกรณ์ | ชื่อ Browser/OS ที่สกัดจาก User-Agent |
+| ความเสี่ยง | Risk Score แสดงเป็นสี (เขียว/เหลือง/แดง) |
+
+```typescript
+function AuditLogTable({ logs }: { logs: AuditLogEntry[] }) {
+  // Mask IP Address เพื่อ Privacy แต่ยังระบุ Subnet ได้
+  const maskIP = (ip: string) => {
+    const parts = ip.split('.');
+    return `${parts[0]}.${parts[1]}.${parts[2]}.xxx`;
+  };
+  
+  // แปลง User-Agent เป็นชื่อที่อ่านง่าย
+  const parseUserAgent = (ua: string) => {
+    if (ua.includes('Chrome')) return 'Google Chrome';
+    if (ua.includes('Firefox')) return 'Mozilla Firefox';
+    if (ua.includes('Safari')) return 'Apple Safari';
+    return 'Unknown Browser';
+  };
+  
+  return (
+    <table className="audit-log-table">
+      <thead>
+        <tr>
+          <th>วันที่/เวลา</th>
+          <th>การกระทำ</th>
+          <th>IP Address</th>
+          <th>อุปกรณ์</th>
+          <th>ความเสี่ยง</th>
+        </tr>
+      </thead>
+      <tbody>
+        {logs.map(log => (
+          <tr key={log.id} className={log.risk_score > 0.5 ? 'high-risk-row' : ''}>
+            <td>{new Date(log.timestamp).toLocaleString('th-TH')}</td>
+            <td>{translateAction(log.action)}</td>
+            <td>{maskIP(log.ip_address)}</td>
+            <td>{parseUserAgent(log.user_agent)}</td>
+            <td>
+              <span className={`risk-badge risk-${getRiskLevel(log.risk_score)}`}>
+                {(log.risk_score * 100).toFixed(0)}%
+              </span>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+```
+
+### 4. Security Alerts Panel
+
+แสดง Alert ที่ต้องการความสนใจของผู้ใช้:
+
+```typescript
+function SecurityAlerts() {
+  const [alerts, setAlerts] = useState<SecurityAlert[]>([]);
+  
+  // ฟัง Real-time Alerts ผ่าน WebSocket
+  useEffect(() => {
+    const ws = getWebSocket();
+    ws.on('trust_score_low', (data) => {
+      setAlerts(prev => [{
+        type: 'warning',
+        message: `Trust Score ต่ำผิดปกติ (${(data.score * 100).toFixed(0)}%)`,
+        timestamp: new Date().toISOString(),
+        action_required: data.score < 0.4 ? 'VERIFY_IDENTITY' : null
+      }, ...prev]);
+    });
+  }, []);
+}
+```
+
+## การเข้าถึง Security Dashboard
+
+<Steps>
+1. Login เข้าระบบปกติ (Password + MFA)
+2. คลิกไอคอน Settings (⚙️) บน Sidebar ของ Chat Interface
+3. เลือกแท็บ **"ความปลอดภัย"** (Security Tab)
+4. Dashboard โหลดข้อมูลจาก Endpoints:
+   - `GET /users/me/audit-logs` — ประวัติ Audit Logs
+   - `GET /calibration/status` — สถานะ Calibration
+   - `GET /users/me/trust-scores` — ประวัติ Trust Score
+</Steps>
+
+## API Endpoints สำหรับ Dashboard
+
+```python
+# backend/main.py - Security Dashboard Endpoints
+
+@app.get("/users/me/audit-logs")
+async def get_my_audit_logs(
+    limit: int = 20,
+    offset: int = 0,
+    current_user = Depends(get_current_user)  # JWT Required
+):
+    """
+    คืนค่า Audit Logs ของผู้ใช้ปัจจุบัน
+    เรียงตามเวลาล่าสุดก่อน (DESC)
+    """
+    logs = await db.get_user_audit_logs(
+        user_id=current_user.id,
+        limit=limit,
+        offset=offset
+    )
+    return {"logs": logs, "total": len(logs)}
+
+@app.get("/users/me/security-summary")
+async def get_security_summary(current_user = Depends(get_current_user)):
+    """
+    สรุปภาพรวมความปลอดภัย: จำนวน Login, Trust Score เฉลี่ย, 
+    จำนวน Failed Attempts, Last Active Device
+    """
+    return {
+        "total_logins_30d": await db.count_logins(current_user.id, days=30),
+        "failed_attempts_30d": await db.count_failures(current_user.id, days=30),
+        "average_trust_score": await db.get_avg_trust_score(current_user.id),
+        "calibration_status": await db.get_calibration_status(current_user.id),
+        "known_devices_count": await db.count_known_devices(current_user.id),
+        "last_login": await db.get_last_login(current_user.id)
+    }
+```
+
+<Aside type="note" title="Data Minimization">
+Dashboard แสดง IP Address แบบ Masked (`203.150.82.xxx`) เพื่อ Privacy ใช้สำหรับตรวจสอบความผิดปกติในระดับ Subnet เท่านั้น ไม่เปิดเผย IP เต็มแก่ผู้ใช้เอง (แต่ Admin สามารถเข้าถึงได้ในกรณีสอบสวน)
+</Aside>

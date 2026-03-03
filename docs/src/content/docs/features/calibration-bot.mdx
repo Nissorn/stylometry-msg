@@ -1,0 +1,215 @@
+---
+title: AI Calibration Bot (Onboarding)
+description: ไฮไลต์ฟีเจอร์ Onboarding ที่แก้ปัญหา Cold Start ด้วย system_bot ที่ขับเคลื่อนโดย Typhoon LLM v2.5 30B เพื่อสร้าง Identity Baseline สำหรับผู้ใช้ใหม่
+---
+
+import { Aside, Steps, Card, CardGrid, Badge } from '@astrojs/starlight/components';
+
+## ปัญหา Cold Start ใน Continuous Authentication
+
+ระบบ Continuous Authentication ต้องการ **Baseline Profile** ของผู้ใช้ก่อนจะสามารถประเมิน Trust Score ได้ แต่ผู้ใช้ใหม่ยังไม่มีประวัติข้อความ นี่คือปัญหาที่เรียกว่า **"Cold Start Problem"**:
+
+```
+ผู้ใช้ใหม่ Register ✓
+      │
+      ▼
+ระบบไม่มี Baseline Profile ← ปัญหา!
+      │
+      ▼
+ไม่สามารถคำนวณ Trust Score ได้
+      │
+      ▼
+Continuous Auth ไม่ทำงาน ← ระบบไม่ปลอดภัย
+```
+
+**ทางออก**: สร้าง Onboarding Experience ที่รวบรวมข้อมูลเพียงพอสำหรับ Baseline ก่อนให้ผู้ใช้เข้าถึง Chat ทั่วไป
+
+## <Badge text="ฟีเจอร์เด่น" variant="success" /> Calibration Bot
+
+**system_bot** คือ AI Chatbot ที่ขับเคลื่อนโดย **Typhoon LLM v2.5 (30B Parameters)** — โมเดลภาษาไทยขนาดใหญ่จาก SCB 10X ที่เชี่ยวชาญด้านภาษาไทย ถูกออกแบบมาเฉพาะเพื่อสนทนากับผู้ใช้ใหม่ในรูปแบบบทสนทนาปกติ เพื่อกระตุ้นให้เขียนข้อความในสไตล์ที่เป็นธรรมชาติที่สุด
+
+<Aside type="note" title="ทำไมต้องใช้ Typhoon LLM?">
+Typhoon LLM ถูกเลือกเนื่องจากความสามารถด้านภาษาไทยที่ดีกว่าโมเดลทั่วไป, เข้าใจบริบทวัฒนธรรมไทย, และสามารถสนทนาแบบ Casual ได้เป็นธรรมชาติ — ทำให้ผู้ใช้เขียนในสไตล์ปกติของตนเอง ไม่ใช่สไตล์ที่จงใจ "ตามแบบ"
+</Aside>
+
+## กระบวนการ Calibration
+
+<Steps>
+1. ### เข้าสู่ Calibration Room
+
+   หลัง Login ครั้งแรก Frontend ตรวจสอบ:
+   
+   ```typescript
+   // useChatWebSocket.ts - ตรวจสอบ Calibration Status
+   const { data: calibrationStatus } = await fetch('/api/calibration/status', {
+     headers: { Authorization: `Bearer ${jwt}` }
+   }).then(r => r.json());
+   
+   if (!calibrationStatus.calibrated) {
+     // Redirect ไปยัง Calibration Room แทน Main Chat
+     navigate('/chat?room=calibration');
+   }
+   ```
+
+2. ### system_bot ทักทายและเริ่มสนทนา
+
+   Bot ส่ง System Prompt ไปยัง Typhoon API เพื่อสร้าง Opening Message ภาษาไทยแบบ Casual:
+   
+   ```python
+   # backend/logic/bot.py (Conceptual)
+   CALIBRATION_SYSTEM_PROMPT = """
+   คุณคือ "น้องBOT" ผู้ช่วยของระบบ Thai-Stylometry
+   งานของคุณคือสนทนากันอย่างเป็นธรรมชาติกับผู้ใช้ใหม่
+   ให้ถามเรื่องทั่วๆไป เช่น งานอดิเรก ชีวิตประจำวัน
+   ใช้ภาษาไทยแบบ Casual เป็นกันเอง อย่าดูเป็นทางการ
+   ห้ามบอกผู้ใช้ว่ากำลังเก็บข้อมูลสำหรับ AI Training
+   """
+   
+   async def get_bot_response(user_message: str, history: list) -> str:
+       response = await typhoon_client.chat.completions.create(
+           model="typhoon-v2.5-30b-instruct",
+           messages=[
+               {"role": "system", "content": CALIBRATION_SYSTEM_PROMPT},
+               *history,
+               {"role": "user", "content": user_message}
+           ],
+           max_tokens=200,
+           temperature=0.8
+       )
+       return response.choices[0].message.content
+   ```
+
+3. ### ผู้ใช้ตอบโต้ (5 ข้อความ)
+
+   ระบบรวบรวมข้อความของผู้ใช้ทุกข้อความ โดยนับเฉพาะข้อความที่ยาวพอ (>5 ตัวอักษร) เพื่อกรอง "โอเค" "ครับ" แบบสั้นๆ ออก:
+   
+   ```python
+   # บันทึก Calibration Message
+   async def save_calibration_message(user_id: int, content: str):
+       if len(content.strip()) < 5:
+           return  # Skip ข้อความที่สั้นเกินไป
+       
+       await db.execute(
+           """INSERT INTO calibration_messages 
+              (user_id, content, timestamp) VALUES (?, ?, ?)""",
+           (user_id, content, datetime.utcnow())
+       )
+       
+       count = await db.get_calibration_count(user_id)
+       if count >= 5:
+           await db.set_calibrated(user_id, True)
+           return {"calibration_complete": True}
+   ```
+
+4. ### สร้าง Identity Baseline
+
+   เมื่อครบ 5 ข้อความ ระบบประมวลผล Calibration Messages เพื่อสร้าง Baseline Profile:
+   
+   ```python
+   # สร้าง Baseline จาก Calibration Messages
+   async def create_baseline(user_id: int):
+       messages = await db.get_calibration_messages(user_id)
+       contents = [m["content"] for m in messages]
+       
+       # สกัด Style Features
+       style_embedding = stylometry_engine.extract_features(contents)
+       
+       # บันทึก Baseline
+       await db.save_user_baseline(user_id, {
+           "style_embedding": style_embedding.tolist(),
+           "calibration_count": len(messages),
+           "created_at": datetime.utcnow().isoformat()
+       })
+   ```
+
+5. ### เข้าสู่ Main Chat
+
+   เมื่อ Calibration เสร็จสมบูรณ์ Frontend รับ Signal และ Redirect ผู้ใช้:
+   
+   ```typescript
+   // WebSocket message handler
+   if (message.type === 'calibration_complete') {
+     showSuccessNotification('AI Calibration เสร็จสมบูรณ์แล้ว!');
+     setTimeout(() => navigate('/chat'), 2000);
+   }
+   ```
+</Steps>
+
+## ระบบ Rate Limiting ป้องกัน Spam
+
+<Aside type="danger" title="การป้องกัน Calibration Bypass">
+ระบบตรวจสอบว่าผู้ใช้ไม่สามารถส่งข้อความสั้นๆ ซ้ำๆ เพื่อผ่าน Calibration อย่างรวดเร็วโดยไม่มีข้อมูลที่มีประโยชน์ มาตรการที่ใช้:
+</Aside>
+
+```python
+# Rate Limiting สำหรับ Calibration Messages
+from collections import defaultdict
+from datetime import datetime, timedelta
+
+rate_limit_store: dict[int, list[datetime]] = defaultdict(list)
+RATE_LIMIT = 3       # สูงสุด 3 ข้อความ
+RATE_WINDOW = 10     # ต่อ 10 วินาที
+
+async def check_calibration_rate_limit(user_id: int) -> bool:
+    now = datetime.utcnow()
+    window_start = now - timedelta(seconds=RATE_WINDOW)
+    
+    # ลบ Timestamp เก่าออก
+    rate_limit_store[user_id] = [
+        t for t in rate_limit_store[user_id] if t > window_start
+    ]
+    
+    if len(rate_limit_store[user_id]) >= RATE_LIMIT:
+        return False  # Rate Limited
+    
+    rate_limit_store[user_id].append(now)
+    return True  # Allowed
+```
+
+มาตรการเพิ่มเติม:
+- **Minimum Message Length**: ข้อความต้องมีอย่างน้อย 5 ตัวอักษร
+- **Cooldown Timer**: บังคับรอ 2 วินาที ระหว่างข้อความ
+- **Duplicate Detection**: ไม่นับข้อความที่ซ้ำกันทุกประตู
+
+## ตัวอย่างการสนทนา Calibration
+
+```
+system_bot: สวัสดีครับ! ผมชื่อน้องBOT 🤖 ยินดีต้อนรับสู่ระบบนะครับ
+            ก่อนเริ่มใช้งานขอคุยกันสักครู่ได้เลยครับ วันนี้เป็นยังไงบ้าง?
+
+user:      สวัสดีครับ วันนี้งานเยอะมากเลยฮะ เหนื่อยนิดหน่อย
+
+system_bot: โอ้ เข้าใจเลยครับ งานเยอะก็เครียดน่าดู ปกติชอบทำอะไรพักผ่อนบ้างครับ?
+
+user:      ชอบเล่นเกมส์ กับดูซีรีส์เกาหลี ฮ่าๆ ธรรมดามากเลยนะ
+
+system_bot: ไม่ธรรมดาเลยนะครับ ซีรีส์เกาหลีสนุกดี ตอนนี้ดูเรื่องอะไรอยู่บ้างครับ?
+
+user:      กำลังดู Squid Game Season 2 อยู่เลย ตื่นเต้นมากกกก
+
+...จนครบ 5 ข้อความ → [Calibration Complete ✓]
+```
+
+## สถาปัตยกรรม Typhoon LLM Integration
+
+```
+[Frontend Chat Message]
+         │
+         ▼
+[WebSocket Handler]
+         │
+         ├── บันทึกข้อความลง DB
+         │
+         └── [Calibration Bot Logic]
+                    │
+                    ▼
+            [Typhoon API Client]
+            POST https://api.opentyphoon.ai/v1/chat/completions
+            Headers: Authorization: Bearer {TYPHOON_API_KEY}
+                    │
+                    ▼
+            [Bot Response] ← Streaming หรือ Non-streaming
+                    │
+                    ▼
+            [ส่งกลับผ่าน WebSocket]
+```

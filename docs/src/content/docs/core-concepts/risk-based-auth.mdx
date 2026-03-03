@@ -1,0 +1,160 @@
+---
+title: Risk-Based & Adaptive Authentication
+description: อธิบายแนวคิด Adaptive Authentication ที่ใช้ Audit Logging และการวิเคราะห์ความเสี่ยงจากบริบทการเข้าถึง (IP, Device, Time) เพื่อปรับระดับการพิสูจน์ตัวตนให้เหมาะสมกับสถานการณ์
+---
+
+import { Aside, Card, CardGrid, Steps } from '@astrojs/starlight/components';
+
+## Risk-Based Authentication คืออะไร?
+
+**Risk-Based Authentication (RBA)** หรือ **Adaptive Authentication** คือกลยุทธ์การรักษาความปลอดภัยที่ **"ปรับระดับการตรวจสอบตามระดับความเสี่ยงที่ประเมินได้"** แทนที่จะใช้กระบวนการเดียวสำหรับทุกสถานการณ์
+
+หลักการคือ: หากบริบทการเข้าถึงดู "ปกติ" → ลด Friction ให้ผู้ใช้ หากบริบทดู "น่าสงสัย" → เพิ่มขั้นตอนการตรวจสอบทันที
+
+<Aside type="note" title="ตัวอย่างในชีวิตจริง">
+เช่นเดียวกับธนาคารที่อนุมัติการโอนเงินจำนวนเล็กน้อยโดยอัตโนมัติ แต่บล็อกการโอนเงินจำนวนมากจากต่างประเทศและขอยืนยันตัวตนก่อน — Risk-Based Authentication ทำงานในลักษณะเดียวกัน
+</Aside>
+
+## Audit Logging System
+
+ระบบบันทึก Audit Log ทุกครั้งที่มีการกระทำด้านความปลอดภัย เพื่อนำไปใช้ในการประเมินความเสี่ยงและการสืบสวนย้อนหลัง
+
+### โครงสร้าง Audit Log
+
+```json
+{
+  "id": "uuid-v4-xxxxx",
+  "user_id": 42,
+  "username": "user123",
+  "action": "LOGIN_SUCCESS",
+  "ip_address": "203.150.82.100",
+  "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+  "timestamp": "2026-02-28T10:30:00.000Z",
+  "metadata": {
+    "country": "TH",
+    "device_fingerprint": "sha256-abcdef...",
+    "mfa_method": "TOTP",
+    "session_id": "sess-xxxx"
+  },
+  "risk_score": 0.12,
+  "status": "LOW_RISK"
+}
+```
+
+### ประเภท Action ที่บันทึก
+
+| Action Code | ความหมาย |
+|---|---|
+| `LOGIN_SUCCESS` | เข้าสู่ระบบสำเร็จ (ผ่านทั้ง Password + MFA) |
+| `LOGIN_FAILED` | รหัสผ่านผิด หรือ OTP ผิด |
+| `MFA_FAILED` | ผ่าน Password แต่ OTP ไม่ถูกต้อง |
+| `TRUST_SCORE_LOW` | Continuous Auth ประเมิน Trust Score ต่ำกว่า Threshold |
+| `STEP_UP_AUTH_REQUIRED` | ระบบบังคับ Re-authentication เพราะพบความเสี่ยง |
+| `NEW_DEVICE_DETECTED` | ตรวจพบการเข้าถึงจากอุปกรณ์ใหม่ที่ไม่เคยเห็นมาก่อน |
+| `WEBSOCKET_CONNECT` | เปิด WebSocket Connection ใหม่ |
+| `CALIBRATION_COMPLETE` | ผู้ใช้ Calibrate AI สำเร็จ |
+
+## กระบวนการประเมินความเสี่ยง (Risk Assessment Pipeline)
+
+เมื่อผู้ใช้พยายาม Login ระบบจะรัน Risk Assessment ก่อนตัดสินใจว่าจะออก JWT หรือบังคับขั้นตอนเพิ่มเติม:
+
+```python
+# ตัวอย่าง Risk Assessment Logic (Conceptual)
+async def assess_login_risk(username: str, ip: str, user_agent: str) -> RiskAssessment:
+    risk_factors = []
+    risk_score = 0.0
+    
+    # Factor 1: ตรวจสอบ IP Address
+    known_ips = await db.get_known_ips(username)
+    if ip not in known_ips:
+        risk_score += 0.25
+        risk_factors.append("NEW_IP_ADDRESS")
+    
+    # Factor 2: ตรวจสอบ User-Agent (Device Fingerprint)
+    known_agents = await db.get_known_user_agents(username)
+    device_hash = hashlib.sha256(user_agent.encode()).hexdigest()
+    if device_hash not in known_agents:
+        risk_score += 0.30
+        risk_factors.append("NEW_DEVICE")
+    
+    # Factor 3: Geolocation ผิดปกติ
+    last_login_country = await db.get_last_login_country(username)
+    current_country = geoip.lookup(ip)
+    if last_login_country and current_country != last_login_country:
+        risk_score += 0.25
+        risk_factors.append("GEO_ANOMALY")
+    
+    # Factor 4: Brute Force Detection
+    recent_failures = await db.count_recent_failures(username, minutes=15)
+    if recent_failures >= 3:
+        risk_score += 0.40
+        risk_factors.append("BRUTE_FORCE_PATTERN")
+    
+    return RiskAssessment(
+        score=min(risk_score, 1.0),
+        factors=risk_factors,
+        recommendation="STEP_UP_AUTH" if risk_score > 0.5 else "ALLOW"
+    )
+```
+
+## New Device Detection & Step-up Authentication
+
+<Aside type="danger" title="นโยบายความปลอดภัยสำคัญ">
+เมื่อระบบตรวจพบการเข้าถึงจาก **อุปกรณ์ใหม่ที่ไม่เคยลงทะเบียนไว้** ระบบจะ**บังคับ Step-up Authentication ทันที** โดยไม่มีข้อยกเว้น แม้ผู้ใช้จะผ่าน Password และ MFA ปกติแล้วก็ตาม
+</Aside>
+
+<Steps>
+1. ระบบตรวจสอบ Device Fingerprint (Hash ของ User-Agent + IP Subnet) เทียบกับ Whitelist ในฐานข้อมูล
+
+2. หากพบอุปกรณ์ใหม่ → ระบบส่งกลับ `{"step_up_required": true, "reason": "NEW_DEVICE_DETECTED"}`
+
+3. Frontend แสดง Step-up Auth Dialog ขอให้ผู้ใช้:
+   - ยืนยัน OTP จาก Authenticator App อีกครั้ง
+   - (Optional ในอนาคต) ยืนยันผ่าน Email One-Time Link
+
+4. หลังผ่าน Step-up Auth → อุปกรณ์ถูกเพิ่มเข้า Whitelist อัตโนมัติ
+
+5. บันทึก `NEW_DEVICE_DETECTED` + `STEP_UP_AUTH_SUCCESS` ลง Audit Log
+</Steps>
+
+## Audit Log Schema ใน SQLite
+
+```sql
+CREATE TABLE audit_logs (
+    id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    action      TEXT NOT NULL,
+    ip_address  TEXT,
+    user_agent  TEXT,
+    timestamp   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    metadata    TEXT,  -- JSON String
+    risk_score  REAL DEFAULT 0.0,
+    CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+-- Index สำหรับ Query Audit Logs ตาม User และเวลา
+CREATE INDEX idx_audit_user_time ON audit_logs(user_id, timestamp DESC);
+```
+
+## การตอบสนองต่อความเสี่ยงแบบ Graduated Response
+
+ระบบไม่ใช้แนวทาง "Block ทันที" สำหรับทุกกรณี แต่ปรับการตอบสนองตามระดับความเสี่ยง:
+
+<CardGrid>
+  <Card title="ความเสี่ยงต่ำ (0.0–0.3)" icon="approve-check-circle">
+    อนุญาตให้เข้าระบบปกติ บันทึก Audit Log เท่านั้น ผู้ใช้ไม่รับรู้ถึงการตรวจสอบ
+  </Card>
+  <Card title="ความเสี่ยงกลาง (0.3–0.6)" icon="warning">
+    แสดง Security Notification ให้ผู้ใช้รับทราบ แนะนำให้ตรวจสอบ Activity Log แต่ยังให้ Proceed ได้
+  </Card>
+  <Card title="ความเสี่ยงสูง (0.6–0.8)" icon="warning">
+    บังคับ Step-up Authentication ด้วย TOTP ก่อนเข้าถึง Protected Resources
+  </Card>
+  <Card title="ความเสี่ยงวิกฤต (0.8–1.0)" icon="error">
+    Block การเข้าถึงชั่วคราว, Lock Session, ส่ง Alert ไปยัง Admin, บันทึก Incident Report ใน Audit Log
+  </Card>
+</CardGrid>
+
+<Aside type="note" title="ความสมดุล Security vs Usability">
+ความท้าทายของ Risk-Based Authentication คือการหาสมดุลระหว่างความปลอดภัยและความสะดวกใช้งาน Threshold ที่เข้มงวดเกินไปจะสร้าง False Positives มาก ทำให้ผู้ใช้ที่ซื่อสัตย์ถูก Block บ่อย ควรนำ User Behavior History มาปรับ Threshold แบบ Personalized
+</Aside>

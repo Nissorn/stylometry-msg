@@ -35,23 +35,30 @@ export interface SecurityState {
  * การตั้งค่าประสบการณ์ผู้ใช้ (เก็บใน localStorage, แชร์ผ่าน Store)
  */
 export interface Preferences {
-    notifSound:   boolean; // เสียงแจ้งเตือนเมื่อได้รับข้อความใหม่
+    notifSound: boolean; // เสียงแจ้งเตือนเมื่อได้รับข้อความใหม่
     notifDesktop: boolean; // Desktop Notification
-    enterToSend:  boolean; // Enter เพื่อส่ง
-    fontSize:     'small' | 'medium' | 'large'; // ขนาดตัวอักษร
+    enterToSend: boolean; // Enter เพื่อส่ง
+    fontSize: 'small' | 'medium' | 'large'; // ขนาดตัวอักษร
 }
 
 /** อ่านค่าเริ่มต้นจาก localStorage (ถ้าไม่มีใช้ default) */
 function loadPrefs(): Preferences {
     const g = (k: string, def: string) => {
-        if (typeof localStorage === 'undefined') return def;
-        return localStorage.getItem(k) ?? def;
+        // ตรวจสอบว่าอยู่ใน Browser และมี localStorage หรือไม่ (ป้องกัน Error ใน SSR)
+        if (typeof window === 'undefined' || typeof localStorage === 'undefined' || !localStorage.getItem) {
+            return def;
+        }
+        try {
+            return localStorage.getItem(k) ?? def;
+        } catch (e) {
+            return def;
+        }
     };
     return {
-        notifSound:   g('pref_notif_sound',   'true')  !== 'false',
+        notifSound: g('pref_notif_sound', 'true') !== 'false',
         notifDesktop: g('pref_notif_desktop', 'false') === 'true',
-        enterToSend:  g('pref_enter_send',    'true')  !== 'false',
-        fontSize:     (g('pref_font_size', 'medium') as Preferences['fontSize']),
+        enterToSend: g('pref_enter_send', 'true') !== 'false',
+        fontSize: (g('pref_font_size', 'medium') as Preferences['fontSize']),
     };
 }
 
@@ -145,12 +152,21 @@ export const useStore = create<ChatStore>((set) => ({
     setPreference: (key, value) => {
         // บันทึกลง localStorage ทันทีขณะที่อัปเดต Store
         const lsKey: Record<keyof Preferences, string> = {
-            notifSound:   'pref_notif_sound',
+            notifSound: 'pref_notif_sound',
             notifDesktop: 'pref_notif_desktop',
-            enterToSend:  'pref_enter_send',
-            fontSize:     'pref_font_size',
+            enterToSend: 'pref_enter_send',
+            fontSize: 'pref_font_size',
         };
-        localStorage.setItem(lsKey[key], String(value));
+
+        // ตรวจสอบก่อนบันทึก (ป้องกัน Error ใน SSR หรือปิดคุกกี้)
+        if (typeof window !== 'undefined' && typeof localStorage !== 'undefined' && localStorage.setItem) {
+            try {
+                localStorage.setItem(lsKey[key], String(value));
+            } catch (e) {
+                console.warn('Failed to save preference to localStorage:', e);
+            }
+        }
+
         set((state) => ({
             preferences: { ...state.preferences, [key]: value },
         }));

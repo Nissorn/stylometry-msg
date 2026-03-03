@@ -1,0 +1,85 @@
+---
+title: Thai-Stylometry V2
+description: ระบบแชทความปลอดภัยสูงที่ใช้ Continuous Authentication ผ่าน Stylometry AI และ Multi-Factor Authentication
+template: splash
+hero:
+  tagline: ระบบแชทที่รู้จักคุณจากสไตล์การพิมพ์ ไม่ใช่แค่รหัสผ่าน
+  image:
+    file: ../../assets/houston.webp
+  actions:
+    - text: เริ่มต้นใช้งาน
+      link: /getting-started/setup/
+      icon: right-arrow
+      variant: primary
+    - text: ดู GitHub Repository
+      link: https://github.com/
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, Aside } from '@astrojs/starlight/components';
+
+## Thai-Stylometry V2: Secure Chat คืออะไร?
+
+**Thai-Stylometry V2** คือระบบแชทความปลอดภัยสูงที่พัฒนาขึ้นสำหรับสภาพแวดล้อมที่ต้องการการพิสูจน์ตัวตนอย่างต่อเนื่อง (Continuous Authentication) ระบบไม่เพียงแต่ตรวจสอบผู้ใช้ตอนเข้าสู่ระบบเท่านั้น แต่ยังคอยวิเคราะห์พฤติกรรมการพิมพ์ข้อความ (Keystroke Dynamics & Writing Style) ตลอดการใช้งาน เพื่อตรวจจับกรณีที่บัญชีถูกยึดครองโดยบุคคลอื่น (Account Takeover) แม้ว่าผู้บุกรุกจะผ่านการล็อกอินมาแล้วก็ตาม
+
+<Aside type="note" title="แนวคิดหลัก">
+ระบบตั้งอยู่บนสมมติฐานที่ว่า "ทุกคนมีสไตล์การพิมพ์ที่เป็นเอกลักษณ์เฉพาะตัว" — การลากเสียง การใช้คำอุทาน ความเร็วในการพิมพ์ และโครงสร้างประโยค ล้วนเป็นลายนิ้วมือดิจิทัลที่ยากต่อการปลอมแปลง
+</Aside>
+
+## คุณสมบัติหลัก
+
+<CardGrid stagger>
+  <Card title="Continuous Authentication" icon="shield">
+    ระบบ AI ประเมิน Trust Score ของผู้ใช้ทุกๆ 5 ข้อความ โดยใช้โมเดล Attention Char-CNN และ Stacked Ensembles วิเคราะห์สไตล์การพิมพ์ภาษาไทยแบบ Real-time
+  </Card>
+  <Card title="Mandatory MFA (TOTP)" icon="approve-check-circle">
+    บังคับใช้ Two-Factor Authentication ผ่าน Authenticator App ทุกบัญชี โดยใช้ Shared Secret แบบ Base32 ตามมาตรฐาน RFC 6238
+  </Card>
+  <Card title="AI Calibration Bot" icon="rocket">
+    แก้ปัญหา Cold Start ด้วย `system_bot` ที่ขับเคลื่อนโดย Typhoon LLM v2.5 30B ซึ่งจะพูดคุยกับผู้ใช้ใหม่เพื่อสร้าง Identity Baseline ก่อนเริ่มใช้งานจริง
+  </Card>
+  <Card title="Risk-Based Authentication" icon="warning">
+    ระบบ Audit Logging ติดตาม IP Address และ User-Agent หากตรวจพบอุปกรณ์ใหม่ ระบบจะบังคับ Step-up Authentication ทันที
+  </Card>
+  <Card title="Security Dashboard" icon="information">
+    UI แบบ Transparent ที่แสดง Audit Logs ของผู้ใช้เอง พร้อม Progress Bar แสดงความคืบหน้าของ AI Calibration
+  </Card>
+  <Card title="WebSocket Real-time Chat" icon="laptop">
+    ระบบแชทแบบ Real-time ผ่าน WebSocket พร้อม JWT Authentication Header และการตรวจสอบสิทธิ์ทุก Connection
+  </Card>
+</CardGrid>
+
+## สถาปัตยกรรมระบบ (System Architecture)
+
+ระบบประกอบด้วยสองส่วนหลักที่ทำงานร่วมกัน:
+
+| ชั้น (Layer) | เทคโนโลยี | หน้าที่ |
+|---|---|---|
+| **Frontend** | Astro + React + TypeScript | UI/UX, WebSocket Client, State Management (Zustand) |
+| **Backend API** | FastAPI (Python) | REST Endpoints, JWT Auth, Business Logic |
+| **AI Engine** | Python (Mock → Typhoon LLM) | Stylometry Analysis, Calibration Bot |
+| **Database** | SQLite (aiosqlite) | User Data, Messages, Audit Logs, OTP Secrets |
+| **Security** | pyotp + python-jose | TOTP Generation/Verification, JWT Signing |
+
+```
+[User Browser]
+     │
+     ├── HTTPS REST ──► [FastAPI Backend]
+     │                        │
+     └── WSS WebSocket ──►    ├── [SQLite Database]
+                              ├── [AI Stylometry Engine]
+                              └── [Typhoon LLM / Calibration Bot]
+```
+
+<Aside type="caution" title="สภาพแวดล้อมการพัฒนา">
+ในเวอร์ชันปัจจุบัน โมเดล AI Stylometry ยังอยู่ในโหมด Mock สำหรับการพัฒนา การ Deploy ระบบจริงต้องเชื่อมต่อกับ Typhoon LLM API และ Training Pipeline ของโมเดล
+</Aside>
+
+## ผู้พัฒนาและขอบเขตโครงการ
+
+โครงการนี้พัฒนาขึ้นเพื่อการศึกษา ในหัวข้อ **"การประยุกต์ใช้ Stylometry สำหรับ Continuous Authentication ในระบบสื่อสาร"** โดยมีเป้าหมายเพื่อพิสูจน์แนวคิดว่าการวิเคราะห์รูปแบบการเขียนภาษาไทยสามารถนำมาใช้เป็นปัจจัยการพิสูจน์ตัวตนแฝงได้อย่างมีประสิทธิภาพ
+
+---
+
+**พร้อมสำรวจระบบหรือยัง?** ไปที่ [คู่มือการติดตั้ง](/getting-started/setup/) เพื่อเริ่มต้น

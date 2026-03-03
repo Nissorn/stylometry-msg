@@ -1,0 +1,126 @@
+---
+title: Continuous Authentication คืออะไร?
+description: อธิบายความแตกต่างระหว่าง Initial Authentication (การพิสูจน์ตัวตนครั้งแรก) และ Continuous Authentication (การพิสูจน์ตัวตนต่อเนื่อง) รวมถึงเหตุผลที่ระบบความปลอดภัยสมัยใหม่ต้องการทั้งสองอย่าง
+---
+
+import { Aside, Card, CardGrid } from '@astrojs/starlight/components';
+
+## ปัญหาของ Authentication แบบดั้งเดิม
+
+ในระบบรักษาความปลอดภัยแบบดั้งเดิม (Traditional Authentication) การพิสูจน์ตัวตนเกิดขึ้นเพียงครั้งเดียว ณ จุดเข้าสู่ระบบ (Login Gate) เปรียบได้กับการ**ตรวจบัตรประชาชนที่ประตูทางเข้า แต่ไม่มีการตรวจสอบ Identity ซ้ำอีกเลยตลอดทั้งวัน**
+
+กรณีนี้สร้างช่องโหว่ที่เรียกว่า **"Post-Authentication Attack Surface"**:
+
+| สถานการณ์ | ผลกระทบ |
+|---|---|
+| Session Hijacking | ผู้โจมตีขโมย Token และใช้แทนผู้ใช้จริงได้ทันที |
+| Account Sharing | ผู้ใช้แชร์ Session กับบุคคลอื่น ระบบตรวจไม่ได้ |
+| Physical Takeover | บุคคลอื่นนั่งลงที่คอมที่ Login ค้างไว้ |
+| Insider Threat | บัญชีที่ผ่าน Auth แล้วอาจถูกใช้งานโดยคนอื่นในองค์กร |
+
+## Continuous Authentication คืออะไร?
+
+**Continuous Authentication (CA)** หรือ **"การพิสูจน์ตัวตนอย่างต่อเนื่อง"** คือแนวคิดที่ระบบไม่หยุดตรวจสอบ Identity ของผู้ใช้หลังจาก Login แต่จะ**คอยสังเกตพฤติกรรมของผู้ใช้ตลอดเวลา** และประเมินความน่าเชื่อถือ (Trust Score) อย่างต่อเนื่อง
+
+<Aside type="note" title="หลักการ Zero Trust">
+Continuous Authentication สอดคล้องกับหลักการ **Zero Trust Architecture** ที่กล่าวว่า *"Never trust, always verify"* — ไม่ว่าจะ Verify ผ่านมาแล้วครั้งหนึ่ง ก็ต้อง Verify ต่อไปเรื่อยๆ
+</Aside>
+
+## Initial Auth vs. Continuous Auth: เปรียบเทียบเชิงลึก
+
+### Initial Authentication (การพิสูจน์ตัวตนเริ่มต้น)
+
+```
+[User Input] Password + OTP Code
+         │
+         ▼
+[System Check] Hash Comparison (bcrypt) + TOTP Verification
+         │
+         ▼
+[Result] ✓ Pass → Issue JWT Token (อายุ 24 ชั่วโมง)
+         ✗ Fail → Reject + Log Attempt
+```
+
+**ลักษณะของ Initial Auth:**
+- เกิดขึ้น **ครั้งเดียว** ตอน Login
+- ใช้ **Explicit Factors**: รหัสผ่าน (Knowledge Factor) และ OTP (Possession Factor)
+- ผู้ใช้รับรู้ว่าตนเองกำลังถูกตรวจสอบ (**Explicit Authentication**)
+- ผลลัพธ์เป็น **Binary**: ผ่าน หรือ ไม่ผ่าน
+
+### Continuous Authentication (การพิสูจน์ตัวตนต่อเนื่อง)
+
+```
+[User types message 1]  →  Buffer
+[User types message 2]  →  Buffer
+[User types message 3]  →  Buffer
+[User types message 4]  →  Buffer
+[User types message 5]  →  Buffer
+                              │
+                              ▼
+                  [Stylometry Engine Analysis]
+                  - วิเคราะห์ลูกเล่นภาษา
+                  - ตรวจสอบคำอุทาน / การลากเสียง
+                  - เปรียบเทียบกับ Baseline Profile
+                              │
+                              ▼
+                  Trust Score: 0.0 ──────── 1.0
+                              LOW          HIGH
+                               ▲
+                      หาก < Threshold
+                      → Trigger Alert
+```
+
+**ลักษณะของ Continuous Auth:**
+- เกิดขึ้น **ตลอดเวลา** ทุกๆ 5 ข้อความ
+- ใช้ **Implicit Factors**: พฤติกรรมการพิมพ์ (Behavioral Biometrics)
+- ผู้ใช้ **ไม่รับรู้** ว่ากำลังถูกตรวจสอบ — การใช้งานปกติ (**Transparent Authentication**)
+- ผลลัพธ์เป็น **Continuous Score**: ค่าระหว่าง 0.0 ถึง 1.0
+
+## Trust Score และการตอบสนองของระบบ
+
+ระบบแบ่งระดับ Trust Score ออกเป็น 3 ระดับ พร้อมการตอบสนองที่แตกต่างกัน:
+
+<CardGrid>
+  <Card title="TRUSTED (0.7 – 1.0)" icon="approve-check-circle">
+    ระบบทำงานปกติ ไม่มีการขัดจังหวะ Trust Score แสดงเป็นสีเขียวใน Security Dashboard
+  </Card>
+  <Card title="SUSPICIOUS (0.4 – 0.69)" icon="warning">
+    ระบบแสดง Warning Notification แก่ผู้ใช้ บันทึก Event ไว้ใน Audit Log แต่ยังให้ใช้งานต่อได้
+  </Card>
+  <Card title="UNTRUSTED (0.0 – 0.39)" icon="error">
+    ระบบส่ง Alert ด้านความปลอดภัย และอาจบังคับ Re-authentication ด้วย MFA ทันที
+  </Card>
+</CardGrid>
+
+```python
+# ตัวอย่างการประเมิน Trust Score (จาก mock_ai.py)
+def analyze_user_behavior(messages: list[str], baseline: dict) -> dict:
+    """
+    วิเคราะห์พฤติกรรมการพิมพ์เทียบกับ Baseline ของผู้ใช้
+    """
+    score = compute_stylometry_similarity(messages, baseline)
+    
+    if score >= 0.7:
+        status = "TRUSTED"
+    elif score >= 0.4:
+        status = "SUSPICIOUS"
+    else:
+        status = "UNTRUSTED"
+    
+    return {
+        "trust_score": score,
+        "status": status,
+        "analyzed_message_count": len(messages),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+```
+
+## ข้อได้เปรียบของ Continuous Authentication
+
+1. **ลดความเสี่ยงจาก Post-Login Attack**: แม้ผู้โจมตีจะขโมย Session มาได้ หากสไตล์การพิมพ์ไม่ตรง ก็จะถูกตรวจพบ
+2. **User Experience ไม่ถูกรบกวน**: ผู้ใช้ใช้งานได้ตามปกติ ไม่ต้องกรอก OTP ซ้ำๆ เว้นแต่ระบบจะพบความเสี่ยง
+3. **Forensic Evidence**: Trust Score History ใน Audit Log ให้หลักฐานทางดิจิทัลสำหรับการสืบสวน
+
+<Aside type="note" title="ข้อจำกัดที่ต้องทราบ">
+Continuous Authentication มีข้อจำกัดในกรณีที่ผู้ใช้มีอาการป่วย ความเหนื่อยล้า หรืออารมณ์ที่แตกต่างซึ่งอาจส่งผลต่อสไตล์การพิมพ์ชั่วคราว ระบบที่ดีต้องมี **Adaptive Threshold** ที่ปรับตัวตามพฤติกรรมระยะยาวของผู้ใช้ ไม่ใช่แค่เปรียบเทียบกับ Snapshot เดียว
+</Aside>

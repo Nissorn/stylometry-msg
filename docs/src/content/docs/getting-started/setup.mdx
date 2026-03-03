@@ -1,0 +1,177 @@
+---
+title: คู่มือการติดตั้งระบบ
+description: ขั้นตอนการติดตั้งและรัน Thai-Stylometry V2 บนเครื่อง Local สำหรับนักพัฒนาและนักวิจัย
+---
+
+import { Steps, Aside, Tabs, TabItem, Badge } from '@astrojs/starlight/components';
+
+## ความต้องการของระบบ (Prerequisites)
+
+ก่อนเริ่มการติดตั้ง ตรวจสอบให้แน่ใจว่าระบบของคุณมีซอฟต์แวร์ต่อไปนี้ติดตั้งอยู่แล้ว:
+
+| ซอฟต์แวร์ | เวอร์ชันขั้นต่ำ | หมายเหตุ |
+|---|---|---|
+| Python | 3.10+ | แนะนำ 3.12 |
+| Node.js | 18.0+ | แนะนำ LTS |
+| npm | 9.0+ | มาพร้อม Node.js |
+| Git | 2.30+ | สำหรับ Clone Repository |
+
+<Aside type="note" title="ระบบปฏิบัติการที่รองรับ">
+ระบบได้รับการทดสอบบน **macOS** และ **Linux** เป็นหลัก หากใช้ Windows แนะนำให้ใช้ WSL2 (Windows Subsystem for Linux)
+</Aside>
+
+## ขั้นตอนการติดตั้ง
+
+<Steps>
+
+1. ### Clone Repository
+
+   รับโค้ดจาก Git Repository ลงมาในเครื่อง:
+
+   ```bash
+   git clone https://github.com/your-repo/stylometry-msg.git
+   cd stylometry-msg
+   ```
+
+   โครงสร้างไดเรกทอรีหลังจาก Clone จะมีลักษณะดังนี้:
+
+   ```
+   stylometry-msg/
+   ├── backend/          # FastAPI Server
+   │   ├── main.py
+   │   ├── requirements.txt
+   │   └── logic/
+   │       ├── bot.py        # Calibration Bot + AI Logic
+   │       ├── database.py   # SQLite & aiosqlite
+   │       └── mock_ai.py    # Mock Stylometry Engine
+   ├── frontend/         # Astro + React App
+   │   ├── src/
+   │   └── package.json
+   └── docs/             # Starlight Documentation (ไฟล์นี้!)
+   ```
+
+2. ### ตั้งค่า Python Virtual Environment (Backend)
+
+   สร้าง Virtual Environment เพื่อแยก Dependencies ของโปรเจกต์ออกจากระบบ:
+
+   <Tabs>
+     <TabItem label="venv (แนะนำ)">
+       ```bash
+       cd backend
+       python3 -m venv .venv
+       source .venv/bin/activate   # macOS/Linux
+       # หรือ .venv\Scripts\activate  บน Windows
+       ```
+     </TabItem>
+     <TabItem label="conda">
+       ```bash
+       conda create -n stylometry python=3.12
+       conda activate stylometry
+       cd backend
+       ```
+     </TabItem>
+   </Tabs>
+
+3. ### ติดตั้ง Python Dependencies
+
+   ติดตั้ง Libraries ทั้งหมดที่ Backend ต้องการ:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+   หาก `requirements.txt` ยังไม่ครบ ให้ติดตั้งเพิ่มเติม:
+
+   ```bash
+   pip install pyotp "qrcode[pil]"
+   ```
+
+   <Aside type="note" title="Dependencies หลักของ Backend">
+   - `fastapi` + `uvicorn` — Web Framework และ ASGI Server
+   - `aiosqlite` — Async SQLite Driver
+   - `python-jose[cryptography]` — JWT Token Signing/Verification
+   - `pyotp` — TOTP Generation ตามมาตรฐาน RFC 6238
+   - `passlib[bcrypt]` — การ Hash รหัสผ่านแบบปลอดภัย
+   </Aside>
+
+4. ### ตั้งค่า Environment Variables (Backend)
+
+   สร้างไฟล์ `.env` ในโฟลเดอร์ `backend/`:
+
+   ```bash
+   # backend/.env
+   JWT_SECRET_KEY=your-super-secret-key-change-this-in-production
+   JWT_ALGORITHM=HS256
+   ACCESS_TOKEN_EXPIRE_MINUTES=1440
+   DATABASE_URL=./app.db
+   TYPHOON_API_KEY=your-typhoon-api-key   # สำหรับ Calibration Bot
+   ```
+
+   <Aside type="danger" title="ข้อควรระวังด้านความปลอดภัย">
+   **ห้ามนำค่า `JWT_SECRET_KEY` จริงไป Commit ลง Git เด็ดขาด!** ให้เพิ่ม `.env` เข้า `.gitignore` และใช้ Secret Management Service ในสภาพแวดล้อม Production
+   </Aside>
+
+5. ### รัน Backend Server
+
+   สั่งรัน FastAPI Server ผ่าน Uvicorn พร้อม Hot-Reload สำหรับการพัฒนา:
+
+   ```bash
+   cd backend
+   uvicorn main:app --reload --host 0.0.0.0 --port 8000
+   ```
+
+   เมื่อรันสำเร็จจะเห็นข้อความ:
+
+   ```
+   INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+   INFO:     Started reloader process [PID] using WatchFiles
+   INFO:     Application startup complete.
+   ```
+
+   สามารถเข้าดู **Interactive API Docs** ได้ที่:
+   - Swagger UI: `http://localhost:8000/docs`
+   - ReDoc: `http://localhost:8000/redoc`
+
+6. ### ติดตั้ง Frontend Dependencies
+
+   เปิด Terminal ใหม่ แล้วติดตั้ง Node.js Packages:
+
+   ```bash
+   cd frontend
+   npm install
+   ```
+
+7. ### รัน Frontend Development Server
+
+   ```bash
+   npm run dev
+   ```
+
+   เมื่อรันสำเร็จ Frontend จะรันบน **`http://localhost:4321`** (Port เริ่มต้นของ Astro)
+
+</Steps>
+
+## สรุปคำสั่ง Quick Start
+
+```bash
+# Terminal 1: Backend
+cd backend && source .venv/bin/activate && uvicorn main:app --reload
+
+# Terminal 2: Frontend
+cd frontend && npm run dev
+```
+
+## การ Verify การติดตั้ง
+
+หลังรันทั้งสองเซิร์ฟเวอร์แล้ว ทดสอบ API ด้วยคำสั่งนี้:
+
+```bash
+curl http://localhost:8000/health
+# ควรได้รับ: {"status": "ok"}
+```
+
+จากนั้นเปิดเบราว์เซอร์ไปที่ `http://localhost:4321` จะเห็นหน้า Login ของระบบ
+
+<Aside type="note" title="ขั้นตอนถัดไป">
+เมื่อติดตั้งเสร็จแล้ว ให้อ่าน [สถาปัตยกรรมระบบ](/getting-started/architecture/) เพื่อทำความเข้าใจ Flow การทำงานก่อนเริ่มพัฒนา
+</Aside>

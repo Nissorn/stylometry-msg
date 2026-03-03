@@ -1,0 +1,171 @@
+---
+title: Stylometry AI Engine
+description: อธิบายหลักการทำงานของโมเดล Attention Char-CNN และ Stacked Ensembles ในการสกัดคุณลักษณะพฤติกรรมการพิมพ์ภาษาไทยเพื่อใช้พิสูจน์ตัวตน
+---
+
+import { Aside, Card, CardGrid } from '@astrojs/starlight/components';
+
+## Stylometry คืออะไร?
+
+**Stylometry** (สไตโลมิเตอร์) คือศาสตร์การวิเคราะห์รูปแบบการเขียนเชิงสถิติ โดยอาศัยหลักการที่ว่า **"ทุกคนมีลายมือดิจิทัลที่เป็นเอกลักษณ์"** — การเลือกคำ, โครงสร้างประโยค, การใช้เครื่องหมายวรรคตอน, และนิสัยการเขียน ล้วนสะท้อนถึงตัวตนของผู้เขียน
+
+ในบริบทของระบบนี้ Stylometry ถูกนำมาใช้เป็น **Behavioral Biometrics Layer** — ชั้นการพิสูจน์ตัวตนที่วิเคราะห์พฤติกรรมการพิมพ์โดยไม่กระทบประสบการณ์ผู้ใช้
+
+## คุณลักษณะที่ใช้วิเคราะห์ภาษาไทย (Features)
+
+ในภาษาไทยมีคุณลักษณะเฉพาะที่เป็นประโยชน์สำหรับ Stylometry มากกว่าภาษาอื่น:
+
+### 1. Lexical Features (คุณลักษณะระดับคำ)
+
+| คุณลักษณะ | ตัวอย่าง | ความหมาย |
+|---|---|---|
+| **การลากเสียง (Vowel Elongation)** | "โอเคเยยย" vs "โอเค" | บ่งบอกอารมณ์และลักษณะนิสัย |
+| **การใช้คำอุทาน** | "อ่ะ", "นะ", "เนอะ", "ว่ะ" | รูปแบบเฉพาะตัวที่หยั่งรากลึก |
+| **การย่อคำ** | "ยังไง" vs "อย่างไร" | ระดับความเป็นทางการ |
+| **การใช้ภาษาอังกฤษปน** | "โอเคมาก 555", "งานหนักมาก lol" | สัดส่วนการผสมภาษา |
+| **การใช้ตัวเลขแทนเสียงหัวเราะ** | "5555", "555+", "ฮ่าๆ" | รูปแบบการแสดงอารมณ์ |
+
+### 2. Syntactic Features (คุณลักษณะระดับประโยค)
+
+- **ความยาวประโยค**: ผู้ใช้บางคนพิมพ์ยาว บางคนพิมพ์สั้น
+- **การใช้เครื่องหมายวรรคตอน**: จุด (~), จุดไข่ปลา (...), เครื่องหมายอัศเจรีย์ (!)
+- **โครงสร้างประโยค**: ประโยคประธาน-กริยา vs การละประธาน
+
+### 3. Temporal Features (คุณลักษณะด้านเวลา)
+
+- **ความเร็วในการพิมพ์** (Words Per Minute)
+- **เวลาหน่วงระหว่างข้อความ** (Inter-message Delay)
+- **รูปแบบเวลาการส่งข้อความ** (เช้า/กลางวัน/ดึก)
+
+## สถาปัตยกรรมโมเดล AI
+
+### Attention Char-CNN (Primary Model)
+
+```
+Input Text (ภาษาไทย)
+         │
+         ▼
+┌─────────────────────────────┐
+│   Character Tokenizer       │  แบ่งข้อความเป็น Character เดี่ยวๆ
+│   (Thai Unicode aware)      │  รองรับ Unicode Thai Range U+0E00–U+0E7F
+└────────────┬────────────────┘
+             │
+             ▼
+┌─────────────────────────────┐
+│   Character Embedding Layer │  แปลง Character เป็น Dense Vector (dim=128)
+└────────────┬────────────────┘
+             │
+             ▼
+┌─────────────────────────────┐
+│   1D Convolutional Layers   │  สกัด N-gram Features ระดับ Character
+│   (filters: 128, 256, 512)  │  kernel_size: 3, 5, 7
+│   + ReLU Activation         │
+└────────────┬────────────────┘
+             │
+             ▼
+┌─────────────────────────────┐
+│   Self-Attention Module     │  ให้น้ำหนักกับ Character Patterns สำคัญ
+│   (Multi-Head, heads=8)     │  เรียนรู้ว่า Pattern ไหนบ่งบอก Identity มากที่สุด
+└────────────┬────────────────┘
+             │
+             ▼
+┌─────────────────────────────┐
+│   Global Average Pooling    │  สรุป Feature Maps เป็น Fixed-size Vector
+└────────────┬────────────────┘
+             │
+             ▼
+┌─────────────────────────────┐
+│   Dense Layers + Dropout    │  Fully Connected Layers (512 → 256 → 128)
+│   (dropout=0.3)             │  ป้องกัน Overfitting
+└────────────┬────────────────┘
+             │
+             ▼
+         Style Vector
+         (128-dim embedding)
+```
+
+### Stacked Ensemble (Final Decision)
+
+เพื่อเพิ่มความแม่นยำในการตัดสินใจ ระบบใช้ **Stacked Ensemble** รวมผลจากหลายโมเดล:
+
+```python
+# แนวคิด Stacked Ensemble สำหรับ Stylometry
+ensemble_models = [
+    AttentionCharCNN(vocab_size=thai_vocab),    # โมเดลหลัก
+    TFIDFLogisticRegression(ngram_range=(1,3)), # N-gram Baseline
+    BERTStyleEmbedding(model="wangchanberta"),  # Thai BERT Features
+]
+
+# Meta-Learner: Logistic Regression รวมผลจาก Base Models
+meta_learner = LogisticRegression()
+final_trust_score = meta_learner.predict_proba(
+    [model.extract_features(text) for model in ensemble_models]
+)
+```
+
+<Aside type="note" title="โมเดลในปัจจุบัน (Mock Mode)">
+ในเวอร์ชัน Development ระบบใช้ **Mock AI Engine** (`mock_ai.py`) ที่จำลองการให้ Trust Score แบบสุ่มที่ Weighted ตามความยาวข้อความ เพื่อทดสอบ Flow ของระบบโดยไม่ต้องพึ่งพา Trained Model
+</Aside>
+
+## กระบวนการสร้าง Identity Baseline
+
+ก่อนที่ระบบจะสามารถประเมิน Trust Score ได้ จำเป็นต้องมี **Baseline Profile** ของผู้ใช้:
+
+```
+Phase 1: Data Collection (Calibration)
+─────────────────────────────────────
+ผู้ใช้ส่งข้อความ 5+ ข้อความระหว่าง Calibration Chat
+→ เก็บลง calibration_messages table
+
+Phase 2: Feature Extraction
+─────────────────────────────────────
+สกัด Style Features จากทุก Calibration Message
+→ สร้าง average Feature Vector
+
+Phase 3: Baseline Storage
+─────────────────────────────────────
+บันทึก Style Vector ลง user_profiles table
+→ {user_id: "...", style_embedding: [...128 floats...]}
+
+Phase 4: Runtime Comparison
+─────────────────────────────────────
+เปรียบเทียบ Style Vector ของข้อความใหม่ vs Baseline
+→ Cosine Similarity → Trust Score
+```
+
+## การให้ Trust Score ทุกๆ 5 ข้อความ
+
+```python
+# ตัวอย่าง Logic การประเมินใน Backend (WebSocket Handler)
+message_buffer: dict[str, list[str]] = {}  # username → [messages]
+
+async def on_message_received(username: str, content: str):
+    message_buffer.setdefault(username, []).append(content)
+    
+    # ประเมินทุก 5 ข้อความ
+    if len(message_buffer[username]) >= 5:
+        recent_messages = message_buffer[username][-5:]
+        baseline = await db.get_user_baseline(username)
+        
+        result = analyze_user_behavior(recent_messages, baseline)
+        
+        # ส่ง Trust Score Update ไปยัง Client
+        await websocket.send_json({
+            "type": "trust_score_update",
+            "score": result["trust_score"],
+            "status": result["status"]
+        })
+```
+
+<Aside type="danger" title="ข้อจำกัดด้าน Privacy">
+ข้อความทั้งหมดที่ใช้ในการวิเคราะห์ Stylometry จะถูกเก็บไว้ใน Database ผู้พัฒนาต้องให้ข้อมูลนโยบายความเป็นส่วนตัวอย่างชัดเจนแก่ผู้ใช้ และควรพิจารณา **On-device Processing** เพื่อลดความเสี่ยงจากการรั่วไหลของข้อมูลในระบบ Production จริง
+</Aside>
+
+## Metric การวัดประสิทธิภาพโมเดล
+
+| Metric | คำอธิบาย | ค่าเป้าหมาย |
+|---|---|---|
+| **Equal Error Rate (EER)** | จุดที่ False Acceptance Rate = False Rejection Rate | < 5% |
+| **False Acceptance Rate (FAR)** | อัตราที่บุคคลอื่นผ่านการตรวจสอบ | < 2% |
+| **False Rejection Rate (FRR)** | อัตราที่เจ้าของบัญชีถูกปฏิเสธ | < 8% |
+| **Accuracy (Closed-set)** | ความแม่นยำในการระบุตัวตน | > 90% |

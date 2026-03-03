@@ -1,0 +1,162 @@
+---
+title: สถาปัตยกรรมและ Flow การทำงาน
+description: อธิบาย Flow การทำงานของระบบตั้งแต่การสมัครสมาชิก การตั้งค่า MFA การ Calibrate AI ไปจนถึงการใช้งานแชทจริง
+---
+
+import { Aside, Steps, Card, CardGrid } from '@astrojs/starlight/components';
+
+## ภาพรวมสถาปัตยกรรม (High-Level Architecture)
+
+ระบบแบ่งออกเป็น 3 ชั้นหลัก (Three-Tier Architecture) ที่สื่อสารกันผ่านโปรโตคอลมาตรฐาน:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    PRESENTATION LAYER                     │
+│          Astro (SSR) + React (CSR) + TypeScript           │
+│   WebSocket Client │ REST Client │ State (Zustand)        │
+└────────────────────────┬────────────────────────────────┘
+                         │ HTTPS / WSS
+┌────────────────────────▼────────────────────────────────┐
+│                    APPLICATION LAYER                      │
+│                   FastAPI (Python)                        │
+│   REST Endpoints │ WebSocket Hub │ Auth Middleware         │
+│   JWT Validation │ TOTP Verify  │ Rate Limiter             │
+└──────┬──────────────────────────────────┬───────────────┘
+       │                                  │
+┌──────▼──────┐                  ┌────────▼───────────────┐
+│  DATA LAYER │                  │     AI/LLM LAYER        │
+│   SQLite    │                  │  Mock Stylometry Engine  │
+│ (aiosqlite) │                  │  Typhoon LLM v2.5 30B   │
+└─────────────┘                  └────────────────────────┘
+```
+
+## Flow การทำงานแบบสมบูรณ์
+
+### 1. การสมัครสมาชิก (Registration Flow)
+
+<Steps>
+1. ผู้ใช้กรอก Username และ Password ผ่านหน้า Register
+2. Frontend ส่ง `POST /auth/register` ไปยัง Backend
+3. Backend ทำการ **Hash รหัสผ่านด้วย bcrypt** และสร้าง `otp_secret` (Base32 Random Key) สำหรับ TOTP
+4. บันทึกข้อมูลลง Table `users` ใน SQLite
+5. Backend ส่งกลับ `otpauth://` URI และ QR Code สำหรับ Setup Authenticator App
+6. Frontend แสดง QR Code → ผู้ใช้สแกนด้วย Google Authenticator / Authy
+7. ผู้ใช้กรอก OTP 6 หลักเพื่อยืนยัน MFA Setup — **มาตรการนี้บังคับ ไม่สามารถข้ามได้**
+</Steps>
+
+```json
+// ตัวอย่าง Request Body: POST /auth/register
+{
+  "username": "user123",
+  "password": "SecurePass!42"
+}
+
+// ตัวอย่าง Response
+{
+  "message": "Registration successful",
+  "otp_uri": "otpauth://totp/ThaiStylometry:user123?secret=BASE32SECRET&issuer=ThaiStylometry",
+  "qr_code_base64": "data:image/png;base64,..."
+}
+```
+
+### 2. การเข้าสู่ระบบ (Login Flow with MFA)
+
+<Steps>
+1. ผู้ใช้กรอก Username + Password (Factor 1)
+2. Frontend ส่ง `POST /auth/login` → Backend ตรวจสอบ bcrypt Hash
+3. หากรหัสผ่านถูกต้อง → ระบบ**ยังไม่ออก Token** แต่ส่ง `{"mfa_required": true}` กลับ
+4. Frontend เปลี่ยนไปแสดง OTP Input Form
+5. ผู้ใช้กรอก OTP 6 หลักจาก Authenticator App (Factor 2)
+6. Frontend ส่ง `POST /auth/verify-mfa` พร้อม OTP Code
+7. Backend ตรวจสอบ TOTP ด้วย `pyotp.TOTP(secret).verify(otp)` พร้อม Window คลาดเคลื่อน ±30 วินาที
+8. หากถูกต้อง → สร้าง **JWT Access Token** (อายุ 24 ชั่วโมง) และบันทึก Audit Log (IP, User-Agent, Timestamp)
+9. Frontend เก็บ JWT ใน Memory Store (Zustand) **ไม่ใช่ localStorage เพื่อป้องกัน XSS**
+</Steps>
+
+<Aside type="danger" title="ข้อควรระวัง: MFA บังคับ">
+ระบบออกแบบให้ **ไม่มีทางข้าม MFA** ได้ ถึงแม้รหัสผ่านจะถูกต้อง JWT จะยังไม่ถูกออกจนกว่า TOTP จะผ่านการตรวจสอบ นี่คือการป้องกัน Credential Stuffing Attack
+</Aside>
+
+### 3. Calibration Phase (AI Onboarding)
+
+เมื่อผู้ใช้เข้าสู่ระบบครั้งแรกหรือยังไม่มี Baseline ข้อมูล:
+
+<Steps>
+1. Frontend ตรวจสอบ `calibration_status` จาก API → พบว่ายังไม่ Calibrate
+2. ระบบนำ User เข้า **Calibration Chat Room** โดยอัตโนมัติ
+3. `system_bot` (Typhoon LLM v2.5 30B) ส่งข้อความภาษาไทยแบบ Casual เพื่อกระตุ้นให้ผู้ใช้ตอบกลับ
+4. ผู้ใช้ตอบโต้ไปเรื่อยๆ จนครบ **5 ข้อความ** (Minimum Baseline Requirement)
+5. ระบบเก็บทุกข้อความลง `calibration_messages` Table พร้อม Metadata (timestamp, message_length)
+6. เมื่อครบ 5 ข้อความ → สถานะเปลี่ยนเป็น `calibrated=true`
+7. ผู้ใช้สามารถเข้าถึง Chat ทั่วไปได้
+</Steps>
+
+```
+[User connects] → GET /calibration/status → {calibrated: false}
+                                                    │
+                                    ┌───────────────▼──────────────────┐
+                                    │         Calibration Room          │
+                                    │  system_bot: "สวัสดีครับ! ..."   │
+                                    │  user: "สวัสดีครับ ..."           │
+                                    │  system_bot: "วันนี้เป็นยังไง..." │
+                                    │  user: "โอเค วันนี้ ..."           │
+                                    │  ... (5 exchanges min)            │
+                                    └───────────────┬──────────────────┘
+                                                    │
+                                    ┌───────────────▼──────────────────┐
+                                    │    calibrated = true ✓            │
+                                    │    Redirect to Main Chat          │
+                                    └──────────────────────────────────┘
+```
+
+### 4. Real-time Chat with Continuous Auth (WebSocket Flow)
+
+<Steps>
+1. Frontend เปิด WebSocket Connection ไปยัง `ws://backend/ws/{username}`
+2. Backend ตรวจสอบ JWT จาก Query Parameter หรือ Header ทุก Connection
+3. ผู้ใช้ส่งข้อความ → WebSocket Message เดินทางไปยัง Backend
+4. Backend บันทึกข้อความลง Database และ Broadcast ไปยัง Users อื่น
+5. **ทุกๆ 5 ข้อความ** → ระบบเรียก `analyze_user_behavior()` จาก Stylometry Engine
+6. Engine คำนวณ **Trust Score** (0.0 – 1.0) จากข้อความล่าสุด
+7. หาก Trust Score ต่ำกว่า Threshold (เช่น < 0.4) → ส่ง Event `TRUST_SCORE_LOW` ไปยัง Frontend
+8. Frontend แสดง Security Alert และอาจบังคับ Re-authentication
+</Steps>
+
+```typescript
+// ตัวอย่าง WebSocket Message Format (Client → Server)
+{
+  "type": "message",
+  "content": "สวัสดีครับ นัดพรุ่งนี้ยังอยู่นะ",
+  "target_user": "user456",
+  "timestamp": "2026-02-28T10:30:00Z"
+}
+
+// ตัวอย่าง Trust Score Event (Server → Client)
+{
+  "type": "trust_score_update",
+  "score": 0.87,
+  "message_count": 15,
+  "status": "TRUSTED"
+}
+```
+
+<Aside type="note" title="การออกแบบ Stateless WebSocket">
+แม้ WebSocket จะเป็น Stateful Connection แต่ JWT Token ที่ใช้ตรวจสอบตอนเชื่อมต่อเป็น Stateless ทำให้ Backend สามารถ Scale Horizontal ได้โดยใช้ Shared Token Verification
+</Aside>
+
+## สรุป Component Dependencies
+
+<CardGrid>
+  <Card title="Frontend → Backend" icon="right-arrow">
+    REST API (`/auth/*`, `/messages/*`, `/users/*`) ผ่าน HTTPS และ WebSocket (`/ws/{user}`) ผ่าน WSS พร้อม JWT Bearer Token
+  </Card>
+  <Card title="Backend → Database" icon="right-arrow">
+    `aiosqlite` Async Connection ไปยัง `app.db` (SQLite file) ผ่าน Connection Pool
+  </Card>
+  <Card title="Backend → AI Engine" icon="right-arrow">
+    Internal Function Call ไปยัง `mock_ai.py` ในโหมด Development หรือ HTTP Call ไปยัง Typhoon LLM API ในโหมด Production
+  </Card>
+  <Card title="Auth Middleware" icon="shield">
+    FastAPI Dependency Injection ตรวจสอบ JWT ทุก Protected Endpoint และทุก WebSocket Connection ก่อน Execute Handler
+  </Card>
+</CardGrid>

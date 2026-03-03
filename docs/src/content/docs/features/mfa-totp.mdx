@@ -1,0 +1,158 @@
+---
+title: Multi-Factor Authentication (TOTP)
+description: อธิบายการออกแบบและการทำงานของระบบ Two-Factor Authentication แบบบังคับใช้ ผ่าน Time-based One-Time Password (TOTP) ตามมาตรฐาน RFC 6238
+---
+
+import { Aside, Steps, Card, CardGrid } from '@astrojs/starlight/components';
+
+## ทำไมต้องบังคับ MFA?
+
+ในระบบ Thai-Stylometry V2 การใช้ Multi-Factor Authentication (MFA) ไม่ใช่ตัวเลือกเสริม แต่เป็น **ข้อบังคับสำหรับทุกบัญชี** เหตุผลหลักคือ:
+
+1. **รหัสผ่านอย่างเดียวไม่พอ**: Credential Stuffing Attack ใช้รหัสผ่านที่รั่วไหลจาก Data Breach อื่นๆ มาโจมตี — MFA เพิ่มชั้นป้องกันที่ผู้โจมตีต้องครอบครองอุปกรณ์จริง
+2. **Defense in Depth**: MFA เป็นชั้นที่สองของการป้องกัน ก่อนที่ Continuous Authentication จะทำหน้าที่เป็นชั้นที่สาม
+3. **มาตรฐานอุตสาหกรรม**: NIST SP 800-63B แนะนำ MFA สำหรับระบบที่มีข้อมูลสำคัญ
+
+<Aside type="danger" title="ไม่มีการข้าม MFA">
+ระบบออกแบบให้ **JWT Access Token จะไม่ถูกออกจนกว่า TOTP จะผ่านการตรวจสอบ** — ไม่มี Backdoor, ไม่มี Recovery Code ที่ข้ามขั้นตอนนี้ได้ในเวอร์ชันปัจจุบัน
+</Aside>
+
+## TOTP คืออะไร?
+
+**Time-based One-Time Password (TOTP)** คือ Algorithm ที่สร้างรหัสผ่านใช้ครั้งเดียว (OTP) โดยอาศัย:
+- **Shared Secret Key**: สร้างครั้งเดียวตอน Register เก็บทั้ง Server และ Authenticator App ของผู้ใช้
+- **Current Time**: เวลาปัจจุบัน (Unix Timestamp) หารด้วย 30 วินาที
+- **HMAC-SHA1**: Function การ Hash เพื่อสร้าง OTP 6 หลัก
+
+$$
+TOTP = \text{Truncate}\left(\text{HMAC-SHA1}\left(K, \left\lfloor\frac{T}{30}\right\rfloor\right)\right) \mod 10^6
+$$
+
+โดยที่ $K$ คือ Shared Secret และ $T$ คือเวลาปัจจุบันในหน่วยวินาที
+
+## กระบวนการ MFA Setup (Registration)
+
+<Steps>
+1. ### สร้าง Shared Secret
+
+   Backend สร้าง Secret Key แบบสุ่มในรูปแบบ Base32:
+   
+   ```python
+   import pyotp
+   import secrets
+   
+   # สร้าง OTP Secret ขณะ Register
+   otp_secret = pyotp.random_base32()
+   # ตัวอย่าง: "JBSWY3DPEHPK3PXP"
+   
+   # สร้าง URI สำหรับ QR Code
+   totp = pyotp.TOTP(otp_secret)
+   provisioning_uri = totp.provisioning_uri(
+       name=username,
+       issuer_name="Thai-Stylometry V2"
+   )
+   # otpauth://totp/Thai-Stylometry%20V2:user123?secret=JBSWY3DPEHPK3PXP&issuer=Thai-Stylometry%20V2
+   ```
+
+2. ### แสดง QR Code แก่ผู้ใช้
+
+   Backend สร้าง QR Code จาก `provisioning_uri` และส่งกลับเป็น Base64 PNG:
+   
+   ```python
+   import qrcode
+   import base64
+   from io import BytesIO
+   
+   qr = qrcode.QRCode(version=1, box_size=10, border=4)
+   qr.add_data(provisioning_uri)
+   qr.make(fit=True)
+   
+   img = qr.make_image(fill_color="black", back_color="white")
+   buffer = BytesIO()
+   img.save(buffer, format="PNG")
+   qr_base64 = base64.b64encode(buffer.getvalue()).decode()
+   ```
+
+3. ### ผู้ใช้สแกน QR Code
+
+   ผู้ใช้เปิด Authenticator App เช่น:
+   - **Google Authenticator** (iOS / Android)
+   - **Authy** (Multi-device, แนะนำ)
+   - **Microsoft Authenticator**
+   - **1Password** (มี Built-in TOTP)
+   
+   สแกน QR Code → App เพิ่ม Account ใหม่และแสดง OTP 6 หลักที่เปลี่ยนทุก 30 วินาที
+
+4. ### ยืนยัน Setup
+
+   ผู้ใช้กรอก OTP 6 หลักที่เห็นในหน้าจอ → ส่งไปยัง `POST /auth/setup-mfa/verify`
+   
+   Backend ตรวจสอบด้วย:
+   
+   ```python
+   totp = pyotp.TOTP(user.otp_secret)
+   is_valid = totp.verify(
+       otp_code,
+       valid_window=1  # ยอมรับ OTP ย้อนหลัง/ล่วงหน้า 1 Period (30 วินาที)
+   )
+   
+   if is_valid:
+       await db.set_mfa_enabled(user.id, True)
+       return {"message": "MFA setup complete"}
+   else:
+       raise HTTPException(400, "Invalid OTP code")
+   ```
+
+5. ### บันทึก OTP Secret อย่างปลอดภัย
+
+   OTP Secret ถูกเก็บใน Database โดย **ไม่ Encrypt เพิ่มเติม** (เนื่องจากต้องใช้ในการตรวจสอบ) แต่ควรพิจารณา **Encryption at Rest** สำหรับ Production
+   
+   ```sql
+   -- Schema ใน SQLite
+   CREATE TABLE users (
+       id           INTEGER PRIMARY KEY,
+       username     TEXT UNIQUE NOT NULL,
+       password_hash TEXT NOT NULL,      -- bcrypt hash
+       otp_secret   TEXT NOT NULL,       -- Base32 TOTP Secret
+       mfa_enabled  BOOLEAN DEFAULT FALSE,
+       created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+   );
+   ```
+</Steps>
+
+## กระบวนการ MFA Verification (Login)
+
+```
+[POST /auth/login]
+  body: {username, password}
+        │
+        ▼
+  bcrypt.verify(password, stored_hash)
+        │
+   ✓ Match ────────────────────→ {mfa_required: true, temp_token: "..."}
+   ✗ No Match ──────────────→ 401 Unauthorized + Log Attempt
+        
+[POST /auth/verify-mfa]
+  body: {temp_token, otp_code}
+        │
+        ▼
+  pyotp.TOTP(secret).verify(otp_code, valid_window=1)
+        │
+   ✓ Valid ─────────────────→ Issue JWT Access Token + Log LOGIN_SUCCESS
+   ✗ Invalid ───────────────→ 401 Unauthorized + Log MFA_FAILED
+```
+
+<Aside type="note" title="Clock Skew Tolerance">
+TOTP ยอมรับความคลาดเคลื่อนของนาฬิกา (Clock Skew) ได้ ±30 วินาที (`valid_window=1`) เพื่อรองรับกรณีที่นาฬิกาของอุปกรณ์ผู้ใช้ไม่ Sync กับ Server ได้สมบูรณ์
+</Aside>
+
+## Authenticator Apps ที่แนะนำ
+
+<CardGrid>
+  <Card title="Google Authenticator" icon="approve-check-circle">
+    ฟรี, ใช้งานง่าย, รองรับ iOS และ Android แต่ไม่มี Cloud Backup — หากเสียโทรศัพท์อาจเข้าระบบไม่ได้
+  </Card>
+  <Card title="Authy" icon="approve-check-circle">
+    รองรับ Multi-device และ Cloud Backup ที่เข้ารหัส เหมาะสำหรับผู้ที่ต้องการความสะดวก
+  </Card>
+</CardGrid>
