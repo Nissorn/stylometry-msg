@@ -15,7 +15,7 @@ interface ProfileData {
     member_since: string | null;
     is_mfa_enabled: boolean;
     contact_count: number;
-    calibration_progress: number;  // 0-5 messages sent to system_bot
+    calibration_progress: number;  // 0-30 messages sent to system_bot
 }
 
 /**
@@ -26,7 +26,7 @@ interface ProfileData {
  */
 const SettingsModal: React.FC<Props> = ({ onClose, onOpenActivity }) => {
     const [activeTab, setActiveTab] = useState<Tab>('profile');
-    const [profile, setProfile]     = useState<ProfileData | null>(null);
+    const [profile, setProfile] = useState<ProfileData | null>(null);
     const [isLoading, setIsLoading] = useState(true);
 
     // ─── General Tab preferences (ดึงจาก Zustand store — sync กับ localStorage อัตโนมัติ) ───
@@ -62,9 +62,9 @@ const SettingsModal: React.FC<Props> = ({ onClose, onOpenActivity }) => {
 
     // ─── Tab config ─────────────────────────────────────────────────
     const tabs: { key: Tab; label: string; icon: React.ReactNode }[] = [
-        { key: 'profile', label: 'โปรไฟล์',  icon: <User size={15} />       },
-        { key: 'privacy', label: 'ความเป็นส่วนตัว', icon: <Shield size={15} />  },
-        { key: 'general', label: 'ทั่วไป',    icon: <Settings size={15} />   },
+        { key: 'profile', label: 'โปรไฟล์', icon: <User size={15} /> },
+        { key: 'privacy', label: 'ความเป็นส่วนตัว', icon: <Shield size={15} /> },
+        { key: 'general', label: 'ทั่วไป', icon: <Settings size={15} /> },
     ];
 
     return (
@@ -77,8 +77,8 @@ const SettingsModal: React.FC<Props> = ({ onClose, onOpenActivity }) => {
         >
             <motion.div
                 initial={{ scale: 0.93, opacity: 0, y: 12 }}
-                animate={{ scale: 1,    opacity: 1, y: 0  }}
-                exit={{    scale: 0.93, opacity: 0, y: 12 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.93, opacity: 0, y: 12 }}
                 transition={{ type: 'spring', stiffness: 320, damping: 28 }}
                 className="bg-tg-sidebar w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden border border-white/5"
             >
@@ -99,11 +99,10 @@ const SettingsModal: React.FC<Props> = ({ onClose, onOpenActivity }) => {
                         <button
                             key={tab.key}
                             onClick={() => setActiveTab(tab.key)}
-                            className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-sm font-medium transition-all ${
-                                activeTab === tab.key
+                            className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-sm font-medium transition-all ${activeTab === tab.key
                                     ? 'text-tg-accent border-b-2 border-tg-accent'
                                     : 'text-tg-text-secondary hover:text-white'
-                            }`}
+                                }`}
                         >
                             {tab.icon}
                             {tab.label}
@@ -121,7 +120,7 @@ const SettingsModal: React.FC<Props> = ({ onClose, onOpenActivity }) => {
                                 key="profile"
                                 initial={{ opacity: 0, x: -8 }}
                                 animate={{ opacity: 1, x: 0 }}
-                                exit={{    opacity: 0, x:  8 }}
+                                exit={{ opacity: 0, x: 8 }}
                                 transition={{ duration: 0.18 }}
                                 className="space-y-4"
                             >
@@ -191,8 +190,8 @@ const SettingsModal: React.FC<Props> = ({ onClose, onOpenActivity }) => {
                                         {/* ─── Security Health & Stylometry ─── */}
                                         {(() => {
                                             const prog = profile?.calibration_progress ?? 0;
-                                            const pct  = Math.round((prog / 5) * 100);
-                                            return prog >= 5 ? (
+                                            const pct = Math.round((prog / 30) * 100);
+                                            return prog >= 30 ? (
                                                 /* ✅ Baseline เสร็จแล้ว */
                                                 <div className="bg-green-500/10 border border-green-500/25 rounded-xl p-4 flex items-center gap-3">
                                                     <div className="w-9 h-9 bg-green-500/20 rounded-lg flex items-center justify-center shrink-0">
@@ -211,7 +210,7 @@ const SettingsModal: React.FC<Props> = ({ onClose, onOpenActivity }) => {
                                                             <Shield size={16} className="text-tg-accent" />
                                                             <span className="text-white text-sm font-medium">Security Health &amp; Stylometry</span>
                                                         </div>
-                                                        <span className="text-tg-accent text-xs font-semibold">Calibration: {prog}/5</span>
+                                                        <span className="text-tg-accent text-xs font-semibold">Calibration: {prog}/30</span>
                                                     </div>
                                                     {/* Progress bar */}
                                                     <div className="w-full h-2 bg-white/10 rounded-full overflow-hidden">
@@ -237,7 +236,7 @@ const SettingsModal: React.FC<Props> = ({ onClose, onOpenActivity }) => {
                                 key="privacy"
                                 initial={{ opacity: 0, x: -8 }}
                                 animate={{ opacity: 1, x: 0 }}
-                                exit={{    opacity: 0, x:  8 }}
+                                exit={{ opacity: 0, x: 8 }}
                                 transition={{ duration: 0.18 }}
                                 className="space-y-3"
                             >
@@ -298,7 +297,7 @@ const SettingsModal: React.FC<Props> = ({ onClose, onOpenActivity }) => {
                                 key="general"
                                 initial={{ opacity: 0, x: -8 }}
                                 animate={{ opacity: 1, x: 0 }}
-                                exit={{    opacity: 0, x:  8 }}
+                                exit={{ opacity: 0, x: 8 }}
                                 transition={{ duration: 0.18 }}
                                 className="space-y-4"
                             >
@@ -340,13 +339,11 @@ const SettingsModal: React.FC<Props> = ({ onClose, onOpenActivity }) => {
                                             role="switch"
                                             aria-checked={row.value}
                                             onClick={() => row.onChange(!row.value)}
-                                            className={`relative w-10 h-5 rounded-full transition-colors shrink-0 ${
-                                                row.value ? 'bg-tg-accent' : 'bg-white/20'
-                                            }`}
+                                            className={`relative w-10 h-5 rounded-full transition-colors shrink-0 ${row.value ? 'bg-tg-accent' : 'bg-white/20'
+                                                }`}
                                         >
-                                            <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${
-                                                row.value ? 'left-5' : 'left-0.5'
-                                            }`} />
+                                            <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${row.value ? 'left-5' : 'left-0.5'
+                                                }`} />
                                         </button>
                                     </div>
                                 ))}
@@ -362,11 +359,10 @@ const SettingsModal: React.FC<Props> = ({ onClose, onOpenActivity }) => {
                                             <button
                                                 key={s}
                                                 onClick={() => setPreference('fontSize', s)}
-                                                className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                                                    fontSize === s
+                                                className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition-all ${fontSize === s
                                                         ? 'bg-tg-accent text-white'
                                                         : 'bg-white/10 text-tg-text-secondary hover:text-white'
-                                                }`}
+                                                    }`}
                                             >
                                                 {s === 'small' ? 'เล็ก' : s === 'medium' ? 'กลาง' : 'ใหญ่'}
                                             </button>

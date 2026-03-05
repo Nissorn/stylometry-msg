@@ -1,73 +1,260 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle, memo } from 'react';
 import { useStore } from '../../store/useStore';
 import { useChatWebSocket } from '../../hooks/useChatWebSocket';
 import { Send, Smile, Info } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
+// ─── Emoji list (static — outside components to avoid re-creation on each render) ───
+/**
+ * Safely format a message timestamp for display.
+ * Returns HH:MM if the value is a valid date, empty string otherwise.
+ * Handles undefined, null, empty strings, and NaN dates gracefully.
+ */
+function formatMessageTime(timestamp: string | undefined | null): string {
+    if (!timestamp) return '';
+    const d = new Date(timestamp);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+const COMMON_EMOJIS = [
+    '😀', '😂', '🥹', '😍', '🥰', '😎', '🤔', '😅', '🙏', '👍',
+    '❤️', '🔥', '✅', '🎉', '😭', '💀', '🫡', '🤝', '👀', '💪',
+    '😤', '🫠', '🤣', '😇', '🥲', '😏', '🙄', '😬', '🤯', '🥳',
+];
+
+// ─── ChatInputArea ────────────────────────────────────────────────────────────
+// Isolated memoized component — owns inputText state so typing never causes
+// ChatWindow (message list + security logic) to re-render on every keystroke.
+
+interface ChatInputAreaProps {
+    isFrozen: boolean;
+    isBotTyping: boolean;
+    isSending: boolean;
+    activeContact: string;
+    isDevLoading: boolean;
+    onSend: (text: string) => void;
+    onAutoCalibrate: () => void;
+    onGenMessage: (persona: 'owner' | 'hacker') => void;
+}
+
+export interface ChatInputAreaHandle {
+    setValue: (value: string) => void;
+}
+
+const ChatInputArea = memo(
+    forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(
+        ({ isFrozen, isBotTyping, isSending, activeContact, isDevLoading, onSend, onAutoCalibrate, onGenMessage }, ref) => {
+            const [inputText, setInputText] = useState('');
+            const [showEmojiPanel, setShowEmojiPanel] = useState(false);
+            const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+            useImperativeHandle(ref, () => ({
+                setValue: (value: string) => {
+                    setInputText(value);
+                    textareaRef.current?.focus();
+                },
+            }));
+
+            const handleInsertEmoji = (emoji: string) => {
+                const el = textareaRef.current;
+                if (!el) return;
+                el.focus();
+                const inserted = document.execCommand('insertText', false, emoji);
+                if (!inserted) {
+                    const start = el.selectionStart ?? el.value.length;
+                    const end = el.selectionEnd ?? el.value.length;
+                    const next = el.value.slice(0, start) + emoji + el.value.slice(end);
+                    setInputText(next);
+                    requestAnimationFrame(() => {
+                        el.selectionStart = el.selectionEnd = start + emoji.length;
+                    });
+                }
+                setShowEmojiPanel(false);
+            };
+
+            const isInputDisabled = isFrozen || isBotTyping || isSending;
+
+            const placeholder = isFrozen
+                ? 'ถูกล็อคชั่วคราว - กรุณายืนยันตัวตน'
+                : isBotTyping
+                    ? 'กรุณารอบอทตอบกลับ...'
+                    : isSending
+                        ? 'กำลังส่ง...'
+                        : 'เขียนข้อความ...';
+
+            const handleSubmit = (e?: React.FormEvent | React.KeyboardEvent) => {
+                if (e) e.preventDefault();
+                const text = inputText.trim();
+                if (!text || isInputDisabled) return;
+                onSend(text);
+                setInputText('');
+            };
+
+            return (
+                <div className="p-4 bg-tg-sidebar border-t border-[#0f1721]">
+                    <AnimatePresence>
+                        {showEmojiPanel && (
+                            <motion.div
+                                key="emoji-panel"
+                                initial={{ opacity: 0, y: 8, scale: 0.95 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                exit={{ opacity: 0, y: 8, scale: 0.95 }}
+                                className="max-w-4xl mx-auto mb-2 bg-tg-header rounded-2xl p-3 grid grid-cols-10 gap-1 shadow-lg"
+                            >
+                                {COMMON_EMOJIS.map((emoji) => (
+                                    <button
+                                        key={emoji}
+                                        type="button"
+                                        onClick={() => handleInsertEmoji(emoji)}
+                                        className="text-xl p-1 rounded-lg hover:bg-tg-sidebar transition-colors leading-none"
+                                    >
+                                        {emoji}
+                                    </button>
+                                ))}
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+
+                    {activeContact === 'test_mode' && (
+                        <div className="max-w-4xl mx-auto mb-2 flex gap-2 justify-end">
+                            <button type="button" onClick={onAutoCalibrate} disabled={isDevLoading}
+                                className="px-3 py-1 bg-gray-800 text-xs text-white rounded shadow hover:bg-gray-700 disabled:opacity-50">
+                                🚀 Auto-Calibrate
+                            </button>
+                            <button type="button" onClick={() => onGenMessage('owner')} disabled={isDevLoading}
+                                className="px-3 py-1 bg-gray-800 text-xs text-white rounded shadow hover:bg-gray-700 disabled:opacity-50">
+                                👨‍💼 Gen: Owner
+                            </button>
+                            <button type="button" onClick={() => onGenMessage('hacker')} disabled={isDevLoading}
+                                className="px-3 py-1 bg-gray-800 text-xs text-white rounded shadow hover:bg-gray-700 disabled:opacity-50">
+                                🥷 Gen: Hacker
+                            </button>
+                        </div>
+                    )}
+
+                    <form onSubmit={handleSubmit} className="max-w-4xl mx-auto flex items-end gap-2">
+                        <div className="flex-1 bg-tg-header rounded-2xl p-2 flex items-end transition-all focus-within:ring-1 focus-within:ring-tg-accent shadow-inner">
+                            <button
+                                type="button"
+                                onClick={() => setShowEmojiPanel((v) => !v)}
+                                className={`p-2 transition-colors ${showEmojiPanel ? 'text-tg-accent' : 'text-tg-text-secondary hover:text-tg-accent'}`}
+                            >
+                                <Smile size={24} />
+                            </button>
+                            <textarea
+                                ref={textareaRef}
+                                rows={1}
+                                placeholder={placeholder}
+                                className="flex-1 bg-transparent border-none outline-none py-2 px-2 text-tg-text resize-none max-h-32 disabled:opacity-50"
+                                value={inputText}
+                                onChange={(e) => setInputText(e.target.value)}
+                                disabled={isInputDisabled}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter' && !e.shiftKey) handleSubmit(e);
+                                }}
+                            />
+                        </div>
+                        <button
+                            type="submit"
+                            disabled={!inputText.trim() || isInputDisabled}
+                            className="w-12 h-12 bg-tg-accent rounded-full flex items-center justify-center text-white hover:bg-opacity-90 transition-all disabled:opacity-50 active:scale-95 shadow-lg"
+                        >
+                            <Send size={22} className="ml-0.5" />
+                        </button>
+                    </form>
+                </div>
+            );
+        }
+    )
+);
+ChatInputArea.displayName = 'ChatInputArea';
+
+// ─── ChatWindow (Main Component) ─────────────────────────────────────────────
 /**
  * หน้าต่างแชทหลัก (Center Column)
  */
 const ChatWindow: React.FC = () => {
-    const [inputText, setInputText]     = useState('');
-    // ─── Bot Typing State ───────────────────────────────────────────────
+    // ─── Bot Typing State ─────────────────────────────────────────────────
     // isBotTyping=true → ล็อค Input และแสดง Typing Indicator
     // จะถูกรีเซ็ตเมื่อ system_bot ส่งข้อความตอบกลับมาใน messages
     const [isBotTyping, setIsBotTyping] = useState(false);
-    const botTypingTimerRef             = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const botTypingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     // เก็บจำนวน bot messages ก่อนส่ง เพื่อตรวจจับว่ามีข้อความใหม่หรือไม่
-    const prevBotMsgCountRef            = useRef<number>(0);
-    const [showEmojiPanel, setShowEmojiPanel] = useState(false);
-    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const prevBotMsgCountRef = useRef<number>(0);
 
-    const { currentUser, activeContact, messages, security, setMessages } = useStore();
+    // ─── isSending: 500 ms debounce guard against double-sends ───────────
+    // Locks the input the moment a WebSocket send is dispatched, automatically
+    // released after 500 ms — prevents duplicate messages on rapid Enter press.
+    const [isSending, setIsSending] = useState(false);
+    const sendCooldownRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const inputAreaRef = useRef<ChatInputAreaHandle>(null);
+    const messagesEndRef = useRef<HTMLDivElement>(null);
+    // Tracks contact switches so the first scroll is instant, not animated
+    const isContactChangeRef = useRef(true);
+
+    const { currentUser, activeContact, messages, security, setMessages, wsStatus } = useStore();
     const { sendMessage } = useChatWebSocket(currentUser);
-    const scrollRef = useRef<HTMLDivElement>(null);
 
-    // ─── Emoji ที่ใช้บ่อยในการแชท ────────────────────────────────────────
-    const COMMON_EMOJIS = [
-        '😀','😂','🥹','😍','🥰','😎','🤔','😅','🙏','👍',
-        '❤️','🔥','✅','🎉','😭','💀','🫡','🤝','👀','💪',
-        '😤','🫠','🤣','😇','🥲','😏','🙄','😬','🤯','🥳',
-    ];
+    // ─── Dev Toolbar Handlers ─────────────────────────────────────────────
+    const [isDevLoading, setIsDevLoading] = useState(false);
 
-    // ─── แทรก Emoji ลง textarea โดยใช้ execCommand (Native-style insert) ───
-    // execCommand('insertText') แทรก ณ ตำแหน่ง cursor จริง และรองรับ undo
-    // fallback: อัปเดต state โดยตรงถ้า execCommand ไม่ได้รับรอง (Firefox)
-    const handleInsertEmoji = (emoji: string) => {
-        const el = textareaRef.current;
-        if (!el) return;
-        el.focus();
-        const inserted = document.execCommand('insertText', false, emoji);
-        if (!inserted) {
-            // Fallback สำหรับ browser ที่ไม่รองรับ execCommand
-            const start = el.selectionStart ?? el.value.length;
-            const end   = el.selectionEnd   ?? el.value.length;
-            const next  = el.value.slice(0, start) + emoji + el.value.slice(end);
-            setInputText(next);
-            // คืน cursor ไปหลัง emoji
-            requestAnimationFrame(() => {
-                el.selectionStart = el.selectionEnd = start + emoji.length;
+    const handleAutoCalibrate = useCallback(async () => {
+        if (!activeContact || activeContact !== 'test_mode') return;
+        setIsDevLoading(true);
+        try {
+            const res = await fetch('http://localhost:8000/api/dev/auto_calibrate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: currentUser }),
             });
+            if (res.ok) {
+                const data = await res.json();
+                alert('Auto-Calibration Complete! 30 baseline messages simulated.');
+                if (data.messages && setMessages) {
+                    setMessages(activeContact, data.messages);
+                }
+            } else {
+                alert('Auto-Calibration Failed.');
+            }
+        } catch (e) {
+            console.error(e);
+        } finally {
+            setIsDevLoading(false);
         }
-        setShowEmojiPanel(false);
-    };
+    }, [activeContact, currentUser, setMessages]);
 
-    // ─── Debug: log สถานะ isBotTyping และจำนวนข้อความทุกครั้งที่ Render ───
-    const activeMsgs = activeContact ? (messages[activeContact] ?? []) : [];
-    console.log(
-        `[ChatWindow render] isBotTyping=${isBotTyping} msgs=${activeMsgs.length} contact=${activeContact}`
-    );
+    const handleGenMessage = useCallback(async (persona: 'owner' | 'hacker') => {
+        setIsDevLoading(true);
+        try {
+            const res = await fetch('http://localhost:8000/api/dev/generate_message', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ persona, topic: 'เรื่องทั่วไป' }),
+            });
+            if (res.ok) {
+                const data = await res.json();
+                // Inject text into the isolated input component via imperative handle
+                inputAreaRef.current?.setValue(data.message);
+            }
+        } catch (e) {
+            console.error(e);
+        } finally {
+            setIsDevLoading(false);
+        }
+    }, []);
 
     // ─── รีเซ็ต Typing State เมื่อเปลี่ยน contact ───────────────────────
     useEffect(() => {
+        isContactChangeRef.current = true;
         setIsBotTyping(false);
         if (botTypingTimerRef.current) clearTimeout(botTypingTimerRef.current);
-        // Snapshot จำนวน bot messages ล่าสุดสำหรับ contact ใหม่
         const botMsgs = activeContact
             ? (messages[activeContact] ?? []).filter((m) => m.sender === 'system_bot')
             : [];
         prevBotMsgCountRef.current = botMsgs.length;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activeContact]);
 
     // ─── ตรวจจับ reply จาก system_bot เพื่อปลดล็อค Input ─────────────────
@@ -89,10 +276,11 @@ const ChatWindow: React.FC = () => {
         }
     }, [messages, activeContact, isBotTyping]);
 
-    // ─── Cleanup timer เมื่อ unmount ───────────────────────────────────
+    // ─── Cleanup timers เมื่อ unmount ──────────────────────────────────
     useEffect(() => {
         return () => {
             if (botTypingTimerRef.current) clearTimeout(botTypingTimerRef.current);
+            if (sendCooldownRef.current) clearTimeout(sendCooldownRef.current);
         };
     }, []);
 
@@ -113,8 +301,8 @@ const ChatWindow: React.FC = () => {
                 if (response.ok) {
                     const data = await response.json();
                     const fetchedMessages = (data.messages ?? []).map((m: any) => ({
-                        sender:    m.sender,
-                        content:   m.content,
+                        sender: m.sender,
+                        content: m.content,
                         timestamp: m.timestamp,
                     }));
                     setMessages(activeContact, fetchedMessages);
@@ -127,37 +315,46 @@ const ChatWindow: React.FC = () => {
         fetchHistory();
     }, [activeContact, setMessages]);
 
-    // ─── เลื่อนลงล่างสุดเมื่อมีข้อความหรือ Typing Indicator เปลี่ยน ───
+    // ─── Auto-scroll: instant on contact change, smooth on new messages ───
     useEffect(() => {
-        if (scrollRef.current) {
-            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        if (!messagesEndRef.current) return;
+        if (isContactChangeRef.current) {
+            // Jump instantly when switching conversations — no jarring scroll from top
+            messagesEndRef.current.scrollIntoView({ behavior: 'instant' as ScrollBehavior });
+            isContactChangeRef.current = false;
+        } else {
+            // Smooth scroll when new messages arrive or the typing indicator toggles
+            messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
         }
     }, [messages, activeContact, isBotTyping]);
 
-    // ─── ส่งข้อความ ─────────────────────────────────────────────────────
-    const handleSend = (e?: React.FormEvent | React.KeyboardEvent) => {
-        if (e) e.preventDefault();
-        if (!inputText.trim() || !activeContact || security.isFrozen || isBotTyping) return;
+    // ─── Send handler (passed down to ChatInputArea via callback) ─────────
+    const handleSend = useCallback(
+        (text: string) => {
+            if (!activeContact || security.isFrozen || isBotTyping || isSending) return;
 
-        sendMessage(activeContact, inputText);
-        setInputText('');
+            // isSending debounce: lock for 500 ms to prevent double-sends on rapid Enter
+            setIsSending(true);
+            if (sendCooldownRef.current) clearTimeout(sendCooldownRef.current);
+            sendCooldownRef.current = setTimeout(() => setIsSending(false), 500);
 
-        // ถ้าคุยกับบอท → ล็อค Input ทันทีจนกว่าจะได้รับ reply
-        if (activeContact === 'system_bot') {
-            const currentBotMsgs = (messages['system_bot'] ?? []).filter(
-                (m) => m.sender === 'system_bot'
-            );
-            prevBotMsgCountRef.current = currentBotMsgs.length;
-            setIsBotTyping(true);
+            sendMessage(activeContact, text);
 
-            // Safety fallback: ปลดล็อคอัตโนมัติหลัง 70 วินาที
-            // ป้องกัน UI ค้างหาก WebSocket หลุดหรือ LLM ไม่ตอบ
-            botTypingTimerRef.current = setTimeout(() => {
-                console.warn('[ChatWindow] Bot reply timeout — releasing lock');
-                setIsBotTyping(false);
-            }, 70_000);
-        }
-    };
+            if (activeContact === 'system_bot') {
+                const currentBotMsgs = (messages['system_bot'] ?? []).filter(
+                    (m) => m.sender === 'system_bot'
+                );
+                prevBotMsgCountRef.current = currentBotMsgs.length;
+                setIsBotTyping(true);
+
+                botTypingTimerRef.current = setTimeout(() => {
+                    console.warn('[ChatWindow] Bot reply timeout — releasing lock');
+                    setIsBotTyping(false);
+                }, 70_000);
+            }
+        },
+        [activeContact, security.isFrozen, isBotTyping, isSending, sendMessage, messages]
+    );
 
     // Safety guard: messages store ยังไม่พร้อม (ป้องกันหน้าจอเทา)
     if (!messages) return null;
@@ -196,11 +393,48 @@ const ChatWindow: React.FC = () => {
                 </div>
             </div>
 
+            {/* WebSocket connection status toast */}
+            <AnimatePresence>
+                {wsStatus !== 'connected' && (
+                    <motion.div
+                        key="ws-status-toast"
+                        initial={{ opacity: 0, y: -12 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -12 }}
+                        transition={{ duration: 0.2 }}
+                        className={`flex items-center justify-center gap-2 py-1.5 text-xs font-medium z-50 ${
+                            wsStatus === 'reconnecting'
+                                ? 'bg-amber-500/90 text-white'
+                                : 'bg-red-600/90 text-white'
+                        }`}
+                    >
+                        {wsStatus === 'reconnecting' ? (
+                            <>
+                                <motion.span
+                                    animate={{ opacity: [1, 0.3, 1] }}
+                                    transition={{ repeat: Infinity, duration: 1.2 }}
+                                    className="w-2 h-2 rounded-full bg-white inline-block"
+                                />
+                                กำลังเชื่อมต่อใหม่…
+                            </>
+                        ) : (
+                            <>
+                                <span className="w-2 h-2 rounded-full bg-white inline-block" />
+                                การเชื่อมต่อขาดหาย — กำลังรอสัญญาณ…
+                            </>
+                        )}
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
             {/* Message Area */}
             <div
-                ref={scrollRef}
                 className="flex-1 overflow-y-auto p-6 space-y-3 custom-scrollbar"
-                style={{ backgroundImage: 'url("https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png")', backgroundBlendMode: 'overlay', backgroundColor: '#0e1621' }}
+                style={{
+                    backgroundImage: 'url("https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png")',
+                    backgroundBlendMode: 'overlay',
+                    backgroundColor: '#0e1621',
+                }}
             >
                 <AnimatePresence initial={false}>
                     {currentChat.map((msg, idx) => {
@@ -214,9 +448,9 @@ const ChatWindow: React.FC = () => {
                             >
                                 <div className={`max-w-[70%] p-3 rounded-2xl shadow-md relative ${isMe ? 'bg-tg-msg-out text-white rounded-tr-none' : 'bg-tg-msg-in text-white rounded-tl-none'
                                     }`}>
-                                    <div className="text-[15px] break-words">{msg.content}</div>
+                                    <div className="text-[15px] break-words break-all">{msg.content}</div>
                                     <div className="text-[10px] text-white/50 text-right mt-1">
-                                        {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                        {formatMessageTime(msg.timestamp)}
                                     </div>
                                 </div>
                             </motion.div>
@@ -253,74 +487,23 @@ const ChatWindow: React.FC = () => {
                         </motion.div>
                     )}
                 </AnimatePresence>
+
+                {/* Scroll anchor — scrollIntoView targets this invisible element */}
+                <div ref={messagesEndRef} aria-hidden="true" />
             </div>
 
-            {/* Input Area */}
-            <div className="p-4 bg-tg-sidebar border-t border-[#0f1721]">
-                {/* ─── Emoji Panel ─────────────────────────────────────────────── */}
-                <AnimatePresence>
-                    {showEmojiPanel && (
-                        <motion.div
-                            key="emoji-panel"
-                            initial={{ opacity: 0, y: 8, scale: 0.95 }}
-                            animate={{ opacity: 1, y: 0,  scale: 1    }}
-                            exit={{    opacity: 0, y: 8,  scale: 0.95 }}
-                            className="max-w-4xl mx-auto mb-2 bg-tg-header rounded-2xl p-3 grid grid-cols-10 gap-1 shadow-lg"
-                        >
-                            {COMMON_EMOJIS.map((emoji) => (
-                                <button
-                                    key={emoji}
-                                    type="button"
-                                    onClick={() => handleInsertEmoji(emoji)}
-                                    className="text-xl p-1 rounded-lg hover:bg-tg-sidebar transition-colors leading-none"
-                                >
-                                    {emoji}
-                                </button>
-                            ))}
-                        </motion.div>
-                    )}
-                </AnimatePresence>
-
-                <form onSubmit={handleSend} className="max-w-4xl mx-auto flex items-end gap-2">
-                    <div className="flex-1 bg-tg-header rounded-2xl p-2 flex items-end transition-all focus-within:ring-1 focus-within:ring-tg-accent shadow-inner">
-                        {/* ─── ปุ่ม Emoji: toggle panel ─── */}
-                        <button
-                            type="button"
-                            onClick={() => setShowEmojiPanel((v) => !v)}
-                            className={`p-2 transition-colors ${
-                                showEmojiPanel ? 'text-tg-accent' : 'text-tg-text-secondary hover:text-tg-accent'
-                            }`}
-                        >
-                            <Smile size={24} />
-                        </button>
-                        <textarea
-                            ref={textareaRef}
-                            rows={1}
-                            placeholder={
-                                security.isFrozen  ? 'ถูกล็อคชั่วคราว - กรุณายืนยันตัวตน' :
-                                isBotTyping        ? 'กรุณารอบอทตอบกลับ...' :
-                                'เขียนข้อความ...'
-                            }
-                            className="flex-1 bg-transparent border-none outline-none py-2 px-2 text-tg-text resize-none max-h-32 disabled:opacity-50"
-                            value={inputText}
-                            onChange={(e) => setInputText(e.target.value)}
-                            disabled={security.isFrozen || isBotTyping}
-                            onKeyDown={(e) => {
-                                if (e.key === 'Enter' && !e.shiftKey) {
-                                    handleSend(e);
-                                }
-                            }}
-                        />
-                    </div>
-                    <button
-                        type="submit"
-                        disabled={!inputText.trim() || security.isFrozen || isBotTyping}
-                        className="w-12 h-12 bg-tg-accent rounded-full flex items-center justify-center text-white hover:bg-opacity-90 transition-all disabled:opacity-50 active:scale-95 shadow-lg"
-                    >
-                        <Send size={22} className="ml-0.5" />
-                    </button>
-                </form>
-            </div>
+            {/* ─── Input Area (memoized — typing won't re-render the message list) */}
+            <ChatInputArea
+                ref={inputAreaRef}
+                isFrozen={security.isFrozen}
+                isBotTyping={isBotTyping}
+                isSending={isSending}
+                activeContact={activeContact}
+                isDevLoading={isDevLoading}
+                onSend={handleSend}
+                onAutoCalibrate={handleAutoCalibrate}
+                onGenMessage={handleGenMessage}
+            />
         </div>
     );
 };

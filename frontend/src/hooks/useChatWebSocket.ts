@@ -23,9 +23,25 @@ function playNotifBeep() {
     } catch (_) { /* ไม่ต้องทำอะไร — browser อาจ block autoplay */ }
 }
 
+// ─── Reconnection constants ───────────────────────────────────────────────
+// Minimum delay before the first reconnect attempt.
+// 3 000 ms prevents tight-loop spam when the server bounces rapidly.
+const BASE_BACKOFF_MS = 3_000;
+const MAX_BACKOFF_MS  = 30_000;
+
+/** Returns capped exponential backoff delay for a given attempt number */
+function getBackoffDelay(attempt: number): number {
+    return Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * Math.pow(2, attempt));
+}
+
 export const useChatWebSocket = (username: string | null) => {
-    const socketRef = useRef<WebSocket | null>(null);
-    const { addMessage, updateSecurity, incrementUnread } = useStore();
+    const socketRef         = useRef<WebSocket | null>(null);
+    const retryCountRef     = useRef<number>(0);
+    const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    /** Set to false on unmount so scheduled retries are silently cancelled */
+    const isMountedRef      = useRef<boolean>(true);
+
+    const { addMessage, updateSecurity, incrementUnread, setWsStatus } = useStore();
     // แยก activeContact ออกมาเป็น ref เพื่ออ่านค่าล่าสุดใน onmessage callback
     // โดยไม่ทำให้ WebSocket ถูกตัดและต่อใหม่ทุกครั้งที่ activeContact เปลี่ยน
     const activeContactRef = useRef<string | null>(null);
@@ -46,27 +62,23 @@ export const useChatWebSocket = (username: string | null) => {
     }, []);
 
     const connect = useCallback(() => {
-        if (!username || socketRef.current) return;
+        if (!username || !isMountedRef.current) return;
 
-        // 📌 ดึง Token จาก Cookie (ในกรณีนี้เราอาจจะต้องดึงจากที่บันทึกไว้ หรือเซิร์ฟเวอร์ส่งให้)
-        // สำหรับเดโม่นี้ เราจะดึง token จากการจำลองหรือเรียกหา
-        // ปกติใน FastAPI เราจะส่ง Token ผ่าน Query String สำหรับ WS
+        // Skip if a live socket is already open or mid-handshake
+        const rs = socketRef.current?.readyState;
+        if (rs === WebSocket.OPEN || rs === WebSocket.CONNECTING) return;
 
-        // หมายเหตุ: ในระบบจริงเราอาจจะเก็บ JWT ไว้ใน localStorage (ถ้าไม่ใช้ HttpOnly เท่านั้น)
-        // หรือให้ Backend มี endpoint คืน Token ล่าสุดมาให้
-        // 📌 อัปเดตล่าสุด: ตอนนี้เราใช้ HttpOnly Cookie 
-        // เมื่อเบราว์เซอร์ทำการเชื่อมต่อ WebSocket ไปที่ origin เดิมหรือ backend
-        // Cookie access_token จะถูกแนบไปกับ request โดยอัตโนมัติ
-        // ข้อดีคือมีความปลอดภัยสูงกว่า (JavaScript เข้าถึง Token ไม่ได้ ป้องกัน XSS) 
-        // และป้องกันถูกดักจับผ่าน URL หรือ Logs
-
+        // 📌 HttpOnly Cookie (access_token) ถูกแนบโดยเบราว์เซอร์อัตโนมัติ
         const wsUrl = `ws://localhost:8000/ws/chat/${username}`;
 
         const socket = new WebSocket(wsUrl);
         socketRef.current = socket;
 
         socket.onopen = () => {
-            console.log('WebSocket Connected');
+            if (!isMountedRef.current) return;
+            console.log('✅ WebSocket Connected');
+            retryCountRef.current = 0;
+            setWsStatus('connected');
         };
 
         socket.onmessage = (event) => {
@@ -134,22 +146,41 @@ export const useChatWebSocket = (username: string | null) => {
         };
 
         socket.onclose = () => {
-            console.log('WebSocket Disconnected');
             socketRef.current = null;
-            // พยายามต่อใหม่ถ้าหลุด (จำลอง)
-            // setTimeout(connect, 3000);
+            if (!isMountedRef.current) return;
+
+            const attempt = retryCountRef.current;
+            const delay   = getBackoffDelay(attempt);
+            retryCountRef.current += 1;
+
+            // Show 'disconnected' on first drop so the user sees the alert
+            // immediately. Subsequent attempts show 'reconnecting' with a counter.
+            setWsStatus(attempt === 0 ? 'disconnected' : 'reconnecting');
+            console.warn(
+                `⚠️  WebSocket closed — reconnecting in ${delay / 1000}s (attempt ${attempt + 1})`
+            );
+
+            reconnectTimerRef.current = setTimeout(() => {
+                if (isMountedRef.current) connect();
+            }, delay);
         };
 
         socket.onerror = (err) => {
+            // onclose always fires after onerror — let it handle the reconnect loop
             console.error('WebSocket Error:', err);
         };
-    }, [username, addMessage, updateSecurity]); // 📌 สำคัญ: ห้ามเอาตัวแปรที่เปลี่ยนบ่อยเช่น security.messageWindow มาใส่ตรงนี้ ไม่งั้นท่อจะถูกตัดและต่อใหม่ตลอดเวลา
+    // 📌 สำคัญ: ห้ามเอาตัวแปรที่เปลี่ยนบ่อยมาใส่ใน deps ไม่งั้นท่อจะถูกตัดและต่อใหม่ตลอดเวลา
+    }, [username, addMessage, updateSecurity, setWsStatus]);
 
 
     // 📌 Cleanup logic เพื่อป้องกันการต่อซ้ำซ้อนตอน Vite HMR
     useEffect(() => {
+        isMountedRef.current = true;
         connect();
         return () => {
+            // Signal all pending retries to abort before closing the socket
+            isMountedRef.current = false;
+            if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
             if (socketRef.current) {
                 socketRef.current.close();
                 socketRef.current = null;

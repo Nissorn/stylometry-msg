@@ -25,13 +25,13 @@ const SecurityDashboard: React.FC = () => {
 
     // ข้อมูลสำหรับ Gauge (Trust Score)
     const gaugeData = [
-        { name: 'Trust', value: trustScore * 100 },
-        { name: 'Remaining', value: 100 - (trustScore * 100) },
+        { name: 'Trust', value: trustScore },
+        { name: 'Remaining', value: 100 - trustScore },
     ];
 
     const getStatusColor = () => {
-        if (trustScore >= 0.95) return '#4ade80'; // Green
-        if (trustScore >= 0.80) return '#fbbf24'; // Yellow
+        if (trustScore >= 95) return '#4ade80'; // Green
+        if (trustScore >= 80) return '#fbbf24'; // Yellow
         return '#f87171'; // Red
     };
 
@@ -65,40 +65,22 @@ const SecurityDashboard: React.FC = () => {
                         </PieChart>
                     </ResponsiveContainer>
                     <div className="absolute bottom-2 text-3xl font-bold text-white">
-                        {(trustScore * 100).toFixed(1)}%
+                        {trustScore.toFixed(1)}%
                     </div>
                 </div>
                 <div className="flex items-center gap-2 mt-4">
-                    {trustScore >= 0.95 ? (
+                    {trustScore >= 95 ? (
                         <CheckCircle size={14} className="text-green-400" />
                     ) : (
                         <AlertTriangle size={14} className="text-amber-400" />
                     )}
                     <span className="text-xs font-medium" style={{ color: getStatusColor() }}>
-                        {trustScore >= 0.95 ? 'IDENTITY VERIFIED' : 'IDENTITY SUSPICIOUS'}
+                        {trustScore >= 95 ? 'IDENTITY VERIFIED' : 'IDENTITY SUSPICIOUS'}
                     </span>
                 </div>
             </div>
 
-            {/* 5-Message Window Status */}
-            <div className="bg-tg-header rounded-2xl p-5 mb-6">
-                <div className="flex justify-between items-center mb-4">
-                    <div className="text-xs font-semibold text-tg-text-secondary uppercase">Analysis Window</div>
-                    <Activity size={14} className="text-tg-accent" />
-                </div>
-                <div className="flex gap-2">
-                    {[1, 2, 3, 4, 5].map((i) => (
-                        <div
-                            key={i}
-                            className={`flex-1 h-2 rounded-full transition-all duration-500 ${i <= messageWindow ? 'bg-tg-accent shadow-[0_0_8px_rgba(82,136,193,0.5)]' : 'bg-tg-bg'
-                                }`}
-                        />
-                    ))}
-                </div>
-                <div className="mt-3 text-[11px] text-tg-text-secondary text-center italic">
-                    AI checks every 5 owner's messages
-                </div>
-            </div>
+
 
             {/* Meta-stats Radar Chart */}
             <div className="bg-tg-header rounded-2xl p-5 flex-1 min-h-[300px] flex flex-col">

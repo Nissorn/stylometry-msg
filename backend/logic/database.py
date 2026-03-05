@@ -175,6 +175,18 @@ def ensure_system_bot():
     if 'system_bot' not in contacts_db:
         contacts_db['system_bot'] = []
 
+    if 'test_mode' not in users_db:
+        users_db['test_mode'] = {
+            "username":       "test_mode",
+            "password":       "",          # ไม่ต้อง Login จริง
+            "display_name":   "Test Mode (Gen AI)",
+            "created_at":     datetime.utcnow().isoformat() + "Z",
+            "mfa_secret":     None,
+            "is_mfa_enabled": False,
+        }
+    if 'test_mode' not in contacts_db:
+        contacts_db['test_mode'] = []
+
 def get_user(username):
     return users_db.get(username)
 
@@ -245,14 +257,15 @@ def list_contacts(username):
 def get_calibration_progress(username: str) -> int:
     """
     นับจำนวนข้อความที่ username ส่งไปหา system_bot เพื่อวัดความคืบหน้า Calibration
-    - 0–5 ข้อความ = ยังอยู่ระหว่างเรียนรู้ (Identity Baseline ยังไม่ครบ)
-    - 5 ข้อความ = Identity Baseline Created (Stylometry พร้อมใช้งาน)
+    - 0–30 ข้อความ = ยังอยู่ระหว่างเรียนรู้ (Identity Baseline ยังไม่ครบ)
+    - 30 ข้อความ = Identity Baseline Created (Stylometry พร้อมใช้งาน)
     """
     count = sum(
         1 for msg in messages_db
-        if msg.get("sender") == username and msg.get("receiver") == "system_bot"
+        if msg.get("sender") == username
+        and msg.get("receiver") in ("system_bot", "test_mode")
     )
-    return min(count, 5)
+    return min(count, 30)
 
 def save_message(sender, receiver, content):
     """
@@ -262,9 +275,11 @@ def save_message(sender, receiver, content):
     # เข้ารหัสข้อความเพื่อความปลอดภัย (Encryption Flow)
     encrypted_content = fernet.encrypt(content.encode()).decode()
     msg = {
-        "sender": sender,
-        "receiver": receiver,
-        "content_encrypted": encrypted_content
+        "sender":            sender,
+        "receiver":          receiver,
+        "content_encrypted": encrypted_content,
+        # Timestamp stored in plaintext — not sensitive; required by Frontend for display
+        "timestamp":         datetime.utcnow().isoformat() + "Z",
     }
     messages_db.append(msg)
     return msg
@@ -283,8 +298,9 @@ def get_messages(user1, user2):
             decrypted_content = fernet.decrypt(msg["content_encrypted"].encode()).decode()
             
             history.append({
-                "sender": msg["sender"],
-                "receiver": msg["receiver"],
-                "content": decrypted_content
+                "sender":    msg["sender"],
+                "receiver":  msg["receiver"],
+                "content":   decrypted_content,
+                "timestamp": msg.get("timestamp", datetime.utcnow().isoformat() + "Z"),
             })
     return history

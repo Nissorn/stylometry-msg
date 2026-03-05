@@ -1,0 +1,6 @@
+{
+    "model_path": "models/best_ensemble.pkl",
+    "optimal_threshold": 0.8400000000000003,
+    "final_far": 0.00923134890730972,
+    "final_frr": 0.7697597739048516
+}

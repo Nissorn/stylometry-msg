@@ -24,7 +24,7 @@ export interface MetaStats {
  * สถานะความปลอดภัย (Security State)
  */
 export interface SecurityState {
-    trustScore: number;       // คะแนนความเชื่อมั่น (0.0 - 1.0)
+    trustScore: number;       // คะแนนความเชื่อมั่น (0.0 - 100.0)
     messageWindow: number;    // จำนวนข้อความใน window ปัจจุบัน (0-5)
     isFrozen: boolean;        // สถานะการล็อคหน้าจอ
     currentMeta: MetaStats;   // ค่า meta จาก session ปัจจุบัน
@@ -91,6 +91,10 @@ interface ChatStore {
     security: SecurityState;
     updateSecurity: (updates: Partial<SecurityState>) => void;
     resetSecurity: () => void;
+
+    // WebSocket Connection Status
+    wsStatus: 'connected' | 'disconnected' | 'reconnecting';
+    setWsStatus: (status: 'connected' | 'disconnected' | 'reconnecting') => void;
 
     // ระบบ
     clearStore: () => void;
@@ -173,7 +177,7 @@ export const useStore = create<ChatStore>((set) => ({
     },
 
     security: {
-        trustScore: 1.0,
+        trustScore: 100.0,
         messageWindow: 0,
         isFrozen: false,
         currentMeta: initialMeta,
@@ -184,7 +188,7 @@ export const useStore = create<ChatStore>((set) => ({
     })),
     resetSecurity: () => set({
         security: {
-            trustScore: 1.0,
+            trustScore: 100.0,
             messageWindow: 0,
             isFrozen: false,
             currentMeta: initialMeta,
@@ -192,14 +196,18 @@ export const useStore = create<ChatStore>((set) => ({
         }
     }),
 
+    wsStatus: 'connected',
+    setWsStatus: (status) => set({ wsStatus: status }),
+
     clearStore: () => set({
         currentUser: null,
         contacts: [],
         activeContact: null,
         messages: {},
         unreadCounts: {},
+        wsStatus: 'disconnected',
         security: {
-            trustScore: 1.0,
+            trustScore: 100.0,
             messageWindow: 0,
             isFrozen: false,
             currentMeta: initialMeta,

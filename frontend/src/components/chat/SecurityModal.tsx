@@ -20,7 +20,7 @@ const SecurityModal: React.FC = () => {
         // 📌 จำลองการยืนยันตัวตน (ในระบบจริงต้องยิง API ไปเช็ค password/pin)
         setTimeout(() => {
             if (pin === '1234' || pin.length >= 4) {
-                updateSecurity({ isFrozen: false, trustScore: 1.0, messageWindow: 0 });
+                updateSecurity({ isFrozen: false, trustScore: 100.0, messageWindow: 0 });
             } else {
                 setError('รหัสยืนยันไม่ถูกต้อง กรุณาลองอีกครั้ง');
             }

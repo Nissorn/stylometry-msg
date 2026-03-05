@@ -13,8 +13,9 @@ import io
 import base64
 import pyotp
 import qrcode
+import httpx
 
-from logic import database, mock_ai, bot
+from logic import database, bot
 from logic.database import AuditAction
 
 # ตั้งค่า Security เบื้องต้น
@@ -157,12 +158,24 @@ class ConnectionManager:
         # แมป User เข้ากับ Rolling Window ของข้อความ (1 คนมี deque ของตัวเองไว้เก็บข้อความ)
         # deque(maxlen=5) จะช่วยจัดการลบข้อความเก่าสุดอัตโนมัติเมื่อครบ 5 รายการ (In-memory)
         self.user_message_windows: Dict[str, deque] = {}
+        # [NEW] เก็บ Trust Score แบบ Real-time ตาม Session ของคนนั้น (คะแนนเต็ม 100)
+        self.user_trust_scores: Dict[str, float] = {}
+        # [NEW] เก็บประโยคแชท 5 ประโยคที่สร้างคะแนนต่ำ เพื่อรอ Retrain ตอน Verified
+        self.suspicious_buffer: Dict[str, List[str]] = {}
+        # [NEW] Per-user asyncio.Lock เพื่อป้องกัน Race Condition บน Trust Score EMA
+        self.ai_prediction_locks: Dict[str, asyncio.Lock] = {}
 
     async def connect(self, ws: WebSocket, username: str):
         await ws.accept()
         self.active_connections[username] = ws
         if username not in self.user_message_windows:
             self.user_message_windows[username] = deque(maxlen=5)
+        if username not in self.user_trust_scores:
+            self.user_trust_scores[username] = 100.0  # Initial Score
+        if username not in self.suspicious_buffer:
+            self.suspicious_buffer[username] = []
+        if username not in self.ai_prediction_locks:
+            self.ai_prediction_locks[username] = asyncio.Lock()
 
     def disconnect(self, username: str):
         if username in self.active_connections:
@@ -216,6 +229,270 @@ def _pop_mfa_session(token: str, expected_type: str) -> str:
         )
     return session["username"]
 
+
+async def _trigger_retrain_and_unfreeze(username: str):
+    """
+    Real-time Feedback Loop: ดึงข้อความใน Buffer ไป Fine-tune AI ทันทีที่ปลดล็อคสำเร็จ
+    """
+    if username in manager.user_trust_scores:
+        manager.user_trust_scores[username] = 100.0  # Reset Trust Score กลับเป็น 100 เต็ม
+        
+    suspicious_msgs = manager.suspicious_buffer.get(username, [])
+    if suspicious_msgs:
+        # ยิง HTTP Request เบื้องหลังไปอัปเดตโมเดล (Background Task)
+        asyncio.create_task(_send_retrain_request(username, suspicious_msgs))
+        # Clear buffer
+        manager.suspicious_buffer[username] = []
+
+    # ส่งคำสั่ง UNFREEZE กลับไปเปิดแชทที่ถูก Freeze ไว้
+    unfreeze_payload = {"type": "UNFREEZE", "score": 100.0}
+    await manager.send_personal_message(json.dumps(unfreeze_payload), username)
+
+
+async def _send_retrain_request(username: str, suspicious_msgs: List[str]):
+    # ดึงประวัติที่ผ่านมา 30 ข้อความไปเป็น historical สำหรับป้องกัน Catastrophic Forgetting
+    history_records = database.get_messages(username, "system_bot")
+    # เอาเฉพาะข้อความที่ผู้ใช้พิมพ์
+    user_historical = [msg["content"] for msg in history_records if msg["sender"] == username][-30:]
+    
+    if not user_historical:
+        # Fallback ในกรณีประวัติน้อย
+        user_historical = suspicious_msgs * 5
+        
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            payload = {
+                "user_id": username,
+                "historical_messages": user_historical,
+                "new_messages": suspicious_msgs
+            }
+            res = await client.post("http://localhost:8001/api/retrain_personal", json=payload)
+            res.raise_for_status()
+            print(f"✅ Auto-Retrain Success for {username}. AI weights adapted!")
+    except Exception as e:
+        print(f"❌ Auto-Retrain Failed for {username}: {e}")
+
+
+async def _evaluate_trust_score(sender: str, sliding_window: List[str], ws_ip: str, ws_ua: str):
+    """
+    Background task: ยิง /api/predict แบบ Non-blocking แล้วอัปเดต EMA Trust Score
+
+    Flow:
+      1. ตรวจ per-user Lock — ถ้ามีงานค้างอยู่ให้ข้ามเพื่อป้องกัน Race Condition
+      2. POST /api/predict -> ai_score
+      3. Log: [Old Score] -> [AI Prediction Score] -> [New EMA Score]
+      4. อัปเดต EMA ใน manager.user_trust_scores
+      5. ส่ง SECURITY_UPDATE (score เท่านั้น) กลับหา sender
+      6. ถ้าคะแนนต่ำเกินเกณฑ์ ยิง SECURITY_FREEZE alert
+    """
+    lock = manager.ai_prediction_locks.get(sender)
+    if lock is None or lock.locked():
+        # มีการประเมินค้างอยู่แล้ว — ข้ามเพื่อไม่ให้คะแนน EMA อัปเดตไม่เป็นลำดับ
+        print(f"⏭️  [TrustScore] {sender}: Evaluation skipped (lock busy)")
+        return
+
+    async with lock:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                ai_payload = {"user_id": sender, "messages": sliding_window}
+                response = await client.post("http://localhost:8001/api/predict", json=ai_payload)
+
+                if response.status_code in (400, 404):
+                    print(f"⚠️  [TrustScore] {sender}: AI Model missing or not calibrated — skipped.")
+                    return
+
+                response.raise_for_status()
+                ai_data = response.json()
+
+                raw_ai = float(ai_data.get("trust_score", 1.0))
+
+                # Normalise to 0-100 regardless of whether the model returns
+                # a probability (0.0-1.0) or a percentage (0-100).
+                normalized_ai = raw_ai if raw_ai > 1.0 else raw_ai * 100.0
+
+                old_score = manager.user_trust_scores.get(sender, 100.0)
+
+                # EMA: 0.8 weight on history keeps the score stable for real users;
+                # 0.2 weight on the new AI reading lets genuine anomalies still decay it.
+                new_score = (old_score * 0.8) + (normalized_ai * 0.2)
+                new_score = max(0.0, min(100.0, new_score))
+
+                manager.user_trust_scores[sender] = new_score
+
+                # 📊 Score audit log — shows exact math every cycle
+                print(f"🧮 Math Check: Old={old_score:.2f}, AI={normalized_ai:.2f}, New={new_score:.2f}")
+                print(f"📊 [TrustScore] {sender}: {old_score:.1f} → AI={normalized_ai:.1f} → EMA={new_score:.1f}")
+
+                # ส่ง SECURITY_UPDATE พร้อม score กลับหา sender
+                score_payload = {
+                    "type": "SECURITY_UPDATE",
+                    "score": round(new_score, 4),
+                }
+                await manager.send_personal_message(json.dumps(score_payload), sender)
+
+                # Multi-Level Threshold Alert (raised thresholds — less aggressive)
+                freeze_level = None
+                if new_score < 30:
+                    freeze_level = "MFA"
+                elif new_score < 50:
+                    freeze_level = "PASSWORD"
+
+                if freeze_level:
+                    manager.suspicious_buffer[sender] = sliding_window
+                    database.save_audit_log(
+                        action=AuditAction.STYLOMETRY_ALERT,
+                        ip_address=ws_ip,
+                        user_agent=ws_ua,
+                        user_id=sender,
+                        extra_data={"score": round(new_score, 2), "level": freeze_level},
+                    )
+                    alert_payload = {
+                        "type": "SECURITY_FREEZE",
+                        "level": freeze_level,
+                        "score": round(new_score, 2),
+                    }
+                    await manager.send_personal_message(json.dumps(alert_payload), sender)
+
+        # ─── Graceful Degradation: all AI-service failure modes are caught here.
+        # None of these exceptions propagate — chat delivery is always unaffected.
+        except httpx.TimeoutException:
+            # Timeout is a subclass of RequestError; catch it first for a clearer log
+            print(f"⏱️  [TrustScore] {sender}: AI Service timed out — skipping this cycle")
+        except httpx.HTTPStatusError as e:
+            # raise_for_status() fires for any non-2xx that isn't already handled (e.g. 500)
+            print(f"⚠️  [TrustScore] {sender}: AI Service returned HTTP {e.response.status_code} — skipping this cycle")
+        except httpx.RequestError as e:
+            # Connection refused, DNS failure, etc. — AI microservice is simply down
+            print(f"⚠️  [TrustScore] {sender}: AI Service unreachable — {type(e).__name__}: {e}")
+        except Exception as e:
+            # Catch-all: JSON decode errors, unexpected bugs, etc.
+            # Trust Score is left unchanged for this cycle; WebSocket is unaffected.
+            print(f"⚠️  [TrustScore] {sender}: Unexpected evaluation error ({type(e).__name__}) — {e}")
+
+
+# ========================================
+# DEV TOOLS & TEST MODE
+# ========================================
+
+from pydantic import BaseModel
+
+class DevGenerateRequest(BaseModel):
+    persona: str # 'owner' or 'hacker'
+    topic: str = "เรื่องทั่วไป"
+
+class DevAutoCalibrateRequest(BaseModel):
+    user_id: str
+
+@app.post("/api/dev/generate_message")
+async def dev_generate_message(req: DevGenerateRequest, current_user: str = Depends(get_current_user_from_cookie)):
+    """
+    สร้างข้อความจำลองด้วย LLM เพื่อลดเวลาคิดประโยคพิมพ์
+    persona="owner"  -> ข้อความสุภาพ พิมพ์ถูกหลัก
+    persona="hacker" -> ข้อความวัยรุ่น คำแสลง พิมพ์ผิด
+    """
+    import os
+    from logic import bot
+    
+    api_key = os.getenv("TYPHOON_API_KEY", "").strip()
+    if not api_key:
+        # Fallback offline
+        if req.persona == "owner":
+            return {"message": "สวัสดีครับ วันนี้อากาศดีจังเลย คิดเหมือนผมไหมครับ?"}
+        return {"message": "เห้ยย ว่าไงพวก วันนี้ไม่ได้ไปไหนหวะ แย่สึด55555"}
+        
+    import random
+    import uuid
+    
+    topics = [
+        "การทำงาน", "สภาพอากาศ", "อาหารการกิน", "การเดินทาง",
+        "เพื่อนร่วมงาน", "เทคโนโลยี", "บ่นเรื่องทั่วไป", "วันหยุดพักผ่อน",
+        "เกมและซีรีส์", "ความเหนื่อยล้า"
+    ]
+    
+    actual_topic = req.topic
+    if req.topic == "เรื่องทั่วไป":
+        actual_topic = random.choice(topics)
+        
+    random_seed = str(uuid.uuid4())[:8]
+        
+    prompt = f"แต่งประโยคสั้นๆ 1-2 ประโยค (ยาวประมาณ 20-30 คำ) เกี่ยวกับ '{actual_topic}' (Seed: {random_seed} ไม่ให้ซ้ำกับข้อความอื่นๆ) "
+    if req.persona == "owner":
+        prompt += "ให้สุภาพ เป็นทางการกลางๆ พิมพ์ถูกหลักไวยากรณ์ไทย"
+    else:
+        prompt += "ให้นามแฝงว่าเป็นแฮกเกอร์ วัยรุ่น พิมพ์ห้วนๆ มีคำแสลง พิมพ์ผิดจงใจ หรือมี 555 เยอะๆ"
+
+    try:
+        print(f"DEBUG: Using KEY={api_key[:5]}... PROMPT={prompt}")
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                'https://api.opentyphoon.ai/v1/chat/completions',
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model":       bot.TYPHOON_MODEL,
+                    "messages":    [{"role": "user", "content": prompt}],
+                    "max_tokens":  500,
+                    "temperature": 0.7,
+                    "top_p":       0.95,
+                }
+            )
+            resp.raise_for_status()
+            text = resp.json()["choices"][0]["message"]["content"].strip()
+            return {"message": text}
+    except httpx.HTTPStatusError as e:
+        print(f"🔥 Dev Gen HTTP Error: {e.response.text}")
+        return {"message": f"API Rejection: {e.response.text}"}
+    except Exception as e:
+        print(f"🔥 Dev Gen Error: {e}")
+        return {"message": "เกิดข้อผิดพลาดในการสร้างข้อความ"}
+
+@app.post("/api/dev/auto_calibrate")
+async def dev_auto_calibrate(req: DevAutoCalibrateRequest, current_user: str = Depends(get_current_user_from_cookie)):
+    """
+    จำลองการเทรนตั้งต้น 30 ประโยค: เซฟประโยคสไตล์ Owner 30 ประโยคลงระบบอัตโนมัติ 
+    ยิง Train และข้ามการเรียนรู้เบื้องต้นทั้งหมดให้ทันทีเพื่อใช้ Test Model
+    User is identified from the HttpOnly Cookie — req.user_id is ignored.
+    """
+    sentences = [
+        "สวัสดีครับ ยินดีที่ได้รู้จัก", "ตอนนี้ทำอะไรอยู่เหรอครับ", "ไปกินข้าวด้วยกันไหม?",
+        "วันนี้อากาศดีจังเลยนะ", "ฉันคิดว่าแบบนั้นก็ดีนะ", "ไม่มีปัญหา จัดการให้ได้แน่นอน",
+        "เดี๋ยวจะรีบส่งงานให้นะครับ", "ช่วยตรวจสอบไฟล์นี้ที", "ขอบคุณมากครับที่แนะนำเรื่องนั้น",
+        "แล้วแต่เลย เอาที่สบายใจ", "ไม่เป็นไรครับ ยินดีครับ", "รับทราบ จะดำเนินการเดี๋ยวนี้เลย",
+        "น่าสนใจมาก ขอดูรายละเอียดหน่อยครับ", "ทำไมถึงคิดแบบนั้นล่ะครับ", "ก็ว่าอยู่ว่าทำไมแปลกๆ",
+        "ตลกมากเลยครับ ขอบคุณที่เล่า", "จริงดิ ไม่น่าเชื่อ", "อ๋อ เข้าใจแล้วครับ",
+        "รบกวนหน่อยนะครับ", "ขอโทษทีที่ตอบช้าไปหน่อย", "เดี๋ยวทักไปใหม่นะครับ ช่วงนี้ยุ่งนิดนึง",
+        "พรุ่งนี้ว่างหรือเปล่าครับ", "ไม่แน่ใจแฮะ ขอเช็คดูก่อนนะ", "เยี่ยมไปเลย เป็นข่าวดีจริงๆ",
+        "โอเค ตกลงตามนี้ครับ", "ได้เลย ไม่มีปัญหาครับผม", "งั้นเดี๋ยวเจอกันพรุ่งนี้นะครับ",
+        "ผมเห็นด้วยกับแนวคิดนั้นครับ", "เรื่องนี้ต้องใช้เวลาศึกษาเพิ่มเติม", "จะพยายามทำให้ดีที่สุดนะครับ"
+    ]
+    
+    # Save under the authenticated user (current_user from cookie) so messages
+    # render on the right side and get_calibration_progress counts them correctly.
+    for s in sentences:
+        database.save_message(sender=current_user, receiver="test_mode", content=s)
+        
+    # Trigger Personal Model Training API Call (similar to logic in websocket)
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            train_payload = {
+                "user_id": current_user,
+                "messages": sentences
+            }
+            res = await client.post("http://localhost:8001/api/train_personal", json=train_payload)
+            res.raise_for_status()
+            
+            # ดึงประวัติข้อความมาส่งกลับไปให้หน้า Frontend จะได้รับรู้และ refresh แสดงผล 30 แชทล่าสุดเลย
+            history = database.get_messages(current_user, "test_mode")
+            return {
+                "msg": f"Auto-Calibrated and trained 30 baseline sentences for {current_user}.",
+                "messages": history[-30:]
+            }
+    except httpx.HTTPStatusError as e:
+        print(f"🔥 Auto-Calibrate HTTPError: {e.response.text}")
+        raise HTTPException(status_code=500, detail=f"AI Service Error: {e.response.text}")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=repr(e))
 
 # --------- REST API ENDPOINTS ---------
 
@@ -343,8 +620,10 @@ async def login(request: Request, response: Response, form_data: OAuth2PasswordR
         user_id=user["username"],
     )
 
-    # 📌 Security Upgrade: ส่ง Token กลับไปทาง Set-Cookie (HttpOnly, Secure, SameSite=Lax)
-    # เพื่อป้องกันไม่ให้ฝั่ง Frontend ใช้ JavaScript เข้าถึง Token (XSS Protection)
+    # 📌 Security Upgrade: ส่ง Token กลับไปทาง Set-Cookie 
+    # ทริกเกอร์ UNFREEZE และ Feedback Loop การสอน AI ถ้านี่มาจากการยืนยัน Account
+    await _trigger_retrain_and_unfreeze(user["username"])
+
     response.set_cookie(
         key="access_token",
         value=f"Bearer {access_token}",
@@ -497,6 +776,9 @@ async def mfa_verify(request: Request, response: Response, data: MfaVerifyReques
         )
 
     # ออก JWT Cookie หลังผ่าน TOTP
+    # ทริกเกอร์ UNFREEZE และ Feedback Loop สั่งสอนปรับเปลี่ยน AI Style
+    await _trigger_retrain_and_unfreeze(username)
+
     access_token = create_access_token(
         data={"sub": username},
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
@@ -636,6 +918,15 @@ async def websocket_endpoint(websocket: WebSocket, username: str):
     
     await manager.connect(websocket, username)
     try:
+        # 📌 Pre-fill Sliding Window เมื่อเชื่อมต่อเข้ามาใหม่ (ดึงประวัติ 4 ประโยคล่าสุดฝั่งตัวเอง)
+        # เพื่อให้พอพิมพ์ประโยคเดียวปุ๊บ (รวมของเก่า 4 = 5) ระบบประเมินผลได้ทันทีโดยไม่ต้องรอให้พิมพ์ครบ 5 ครั้ง
+        user_dq = manager.user_message_windows[username]
+        if len(user_dq) == 0:
+            recent_msgs = [m.get("content", "") for m in database.messages_db if m.get("sender") == username][-4:]
+            # Strip any empty strings that came from encrypted-only records
+            user_dq.extend([t for t in recent_msgs if t])
+            print(f"🪣 Pre-fill check for {username}: {len(user_dq)} messages in DQ")
+
         while True:
             data = await websocket.receive_text()
             payload = json.loads(data)
@@ -693,6 +984,35 @@ async def websocket_endpoint(websocket: WebSocket, username: str):
                     await manager.send_personal_message(bot_payload, sndr)
 
                 asyncio.create_task(_reply_as_bot())
+
+                # 📌 2c. Trigger Initial Training: ถ้าทักหาบอทครบ 5 ประโยคพอดี ให้สร้างโมเดล!
+                # เปลี่ยนมาส่งเมื่อครบ 5 พอดี เพื่อไม่ให้สร้างซ้ำซ้อน
+                actual_cal_count = sum(1 for m in database.get_messages(sender, "system_bot") if m["sender"] == sender)
+                
+                if actual_cal_count == 30:
+                    sender_msgs_to_bot = [
+                        m["content"] for m in database.get_messages(sender, "system_bot")
+                        if m["sender"] == sender
+                    ][:30] # ดึง 30 ข้อความแรก
+                    
+                    print(f"🚀 Initializing Personal AI Model for {sender} (Reached {len(sender_msgs_to_bot)} baseline msgs)...")
+                    async def _trigger_train():
+                        try:
+                            async with httpx.AsyncClient(timeout=60.0) as client:
+                                # ยิงไปฝึกโมเดลครั้งแรก
+                                train_payload = {
+                                    "user_id": sender,
+                                    "messages": sender_msgs_to_bot
+                                }
+                                res = await client.post("http://localhost:8001/api/train_personal", json=train_payload)
+                                if res.status_code == 200:
+                                    print(f"✅ Baseline model successfully curated for {sender}!")
+                                else:
+                                    print(f"⚠️ Failed to train baseline: {res.text}")
+                        except Exception as e:
+                            print(f"❌ Initial Model Setup Failed: {e}")
+                    
+                    asyncio.create_task(_trigger_train())
             
             # 📌 3. AI Logic Integration: กฎเหล็ก (STRICT RULE) ของการแยกคนส่ง-คนรับ
             # ระบบจะนำข้อความใส่เข้า deque ของ "sender" (คนที่พิมพ์ข้อความ) เท่านั้น
@@ -701,37 +1021,62 @@ async def websocket_endpoint(websocket: WebSocket, username: str):
             user_dq.append(content)
             
             count = len(user_dq)
-            score = None
-            
-            # ตรวจตราด้วยแบบจำลอง 3 ฐานข้อมูลเมื่อครบ 5 ข้อความของคนพิมพ์คนนี้
-            if count == 5:
-                # ส่ง Array list ของข้อความทั้ง 5 ไปหา AI Mock สำหรับคนส่ง
-                score = mock_ai.simulate_3_brains(list(user_dq))
+
+            if count >= 5:
+                # 📌 Block Premature Prediction: เช็คว่าสร้าง Baseline เสร็จหรือยัง
+                actual_cal_count = sum(1 for m in database.get_messages(sender, "system_bot") if m["sender"] == sender)
+                print(f"📊 Evaluator check: count={count}, cal_count={actual_cal_count}")
                 
-                # ถ้าคะแนนต่ำกว่าเกณฑ์ ให้ส่ง SECURITY_FREEZE
-                if score < 0.95:
-                    # บันทึก Audit Log: ตรวจพบรูปแบบการเขียนผิดปกติ
-                    # เหตุการณ์นี้สำคัญมากสำหรับ Digital ID —
-                    # อาจหมายความว่ามีคนอื่นใช้บัญชีนี้ (Account Takeover)
-                    database.save_audit_log(
-                        action=AuditAction.STYLOMETRY_ALERT,
-                        ip_address=ws_ip,
-                        user_agent=ws_ua,
-                        user_id=sender,
-                        extra_data={"stylometry_score": round(score, 4), "threshold": 0.95},
-                    )
-                    alert_payload = {
-                        "type": "SECURITY_FREEZE",
-                        "score": round(score, 4)
-                    }
-                    await manager.send_personal_message(json.dumps(alert_payload), sender)
+                if actual_cal_count < 30:
+                    # ข้ามการตรวจสอบเลย ไม่ต้องยิงขอ AI เพราะเดี๋ยว Model not calibrated
+                    score = None
+                elif actual_cal_count == 30 and str(receiver).lower() == "system_bot":
+                    # เราได้ trigger train ไว้ด้านบนแล้ว นี่คือจังหวะที่เพิ่งครบ 5
+                    # ให้ล้างตะกร้าข้อความ แล้วข้าม predict
+                    manager.user_message_windows[sender].clear()
+                    continue
+                else:
+                    # 📌 Non-blocking AI Evaluation: ยิง /api/predict ใน Background Task
+                    # ข้อความถูกส่งหา receiver ไปแล้วข้างบน — Trust Score จะมาทีหลัง ไม่บล็อก WebSocket loop
+                    # Per-user Lock จัดการ Race Condition ให้อัตโนมัติใน _evaluate_trust_score
+                    sliding_window = list(user_dq)[-5:]
+                    asyncio.create_task(_evaluate_trust_score(sender, sliding_window, ws_ip, ws_ua))
+
+                    # 📌 Periodic Retraining (ทุกๆ 100 ข้อความที่พิมพ์หาใครก็ได้)
+                    total_sent_msgs = sum(1 for m in database.messages_db if m.get("sender") == sender)
+                    if total_sent_msgs > 0 and total_sent_msgs % 100 == 0:
+                        print(f"🔄 Periodic Retraining triggered for {sender} (Total texts: {total_sent_msgs})")
+                        async def _periodic_retrain():
+                            try:
+                                async with httpx.AsyncClient(timeout=60.0) as client:
+                                    history_records = database.get_messages(sender, "system_bot")
+                                    # ดึงประวัติที่มั่นใจว่าเป็นของแท้ (Calibration 30 ประโยคแรก)
+                                    user_historical = [m["content"] for m in history_records if m["sender"] == sender][:30]
+                                    
+                                    # เอา 10 ข้อความล่าสุดไปอัปเดตโมเดล
+                                    recent_msgs = [m.get("content", "") for m in database.messages_db if m.get("sender") == sender][-10:]
+                                    recent_msgs = [t for t in recent_msgs if t]  # drop empty encrypted-only entries
+                                    
+                                    payload = {
+                                        "user_id": sender,
+                                        "historical_messages": user_historical,
+                                        "new_messages": recent_msgs
+                                    }
+                                    res = await client.post("http://localhost:8001/api/retrain_personal", json=payload)
+                                    res.raise_for_status()
+                                    print(f"✅ Periodic Auto-Retrain Success for {sender}.")
+                            except Exception as e:
+                                print(f"❌ Periodic Auto-Retrain Failed for {sender}: {e}")
+                        
+                        asyncio.create_task(_periodic_retrain())
             
             # 📌 4. บังคับส่งสถานะกลับ (Strict Routing): ส่ง SECURITY_UPDATE กลับไปหา ท่อของคนส่ง (sender) เท่านั้น
             # เช็คให้ชัวร์ว่าจะไม่มีทางถูกส่งไปหา receiver อย่างเด็ดขาด
+            # หมายเหตุ: score จะถูกส่งแยกจาก _evaluate_trust_score background task (Non-blocking)
             update_payload = {
                 "type": "SECURITY_UPDATE",
                 "count": count,
-                "score": round(score, 4) if score is not None else None
+                "score": None,
             }
             await manager.send_personal_message(json.dumps(update_payload), sender)
                     
